@@ -107,8 +107,8 @@ fn empty_state(k: &Kit) -> El {
 fn sorted(ws: &Workspace) -> Vec<&Session> {
     let mut sessions: Vec<&Session> = ws.sessions.iter().collect();
     sessions.sort_by(|a, b| {
-        let active = |s: &Session| s.status != SessionStatus::Active;
-        (active(a), &a.name).cmp(&(active(b), &b.name))
+        let not_active = |s: &Session| s.status != SessionStatus::Active;
+        (not_active(a), &a.name).cmp(&(not_active(b), &b.name))
     });
     sessions
 }

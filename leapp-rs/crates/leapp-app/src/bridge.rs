@@ -50,9 +50,12 @@ impl Bridge {
         }
     }
 
-    /// Sets the function that wakes the UI thread.
+    /// Sets the function that wakes the UI thread, then calls it one time. Messages sent before
+    /// this call had no waker, so this wake makes `poll` read them.
     pub(crate) fn set_waker(&self, waker: Waker) {
-        *self.waker.lock().unwrap() = Some(waker);
+        *self.waker.lock().unwrap() = Some(waker.clone());
+        // Call it outside the lock.
+        waker();
     }
 
     /// All queued messages, oldest first.
