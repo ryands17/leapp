@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::model::{WORKSPACE_VERSION, Workspace};
+use crate::model::{SessionStatus, WORKSPACE_VERSION, Workspace};
 
 /// Reads the workspace file.
 ///
@@ -41,11 +41,20 @@ fn move_aside(path: &Path) -> Result<Workspace> {
 }
 
 /// Writes the workspace file. The write is atomic: temp file in the same folder, then rename.
+///
+/// `Pending` is a state of this run only, so every `Pending` session is written as `Inactive`.
+/// This is the only place that applies the rule, so no writer can put `pending` on disk.
 pub fn save(path: &Path, workspace: &Workspace) -> Result<()> {
+    let mut workspace = workspace.clone();
+    for s in &mut workspace.sessions {
+        if s.status == SessionStatus::Pending {
+            s.status = SessionStatus::Inactive;
+        }
+    }
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    file.write_all(&serde_json::to_vec_pretty(workspace)?)?;
+    file.write_all(&serde_json::to_vec_pretty(&workspace)?)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|e| Error::Io(e.error))?;
     Ok(())

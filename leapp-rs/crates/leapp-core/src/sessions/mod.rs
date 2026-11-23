@@ -276,8 +276,7 @@ impl Leapp {
                 had_original,
             },
         );
-        store::save(&self.workspace_path, &without_pending(&ahead))
-            .map_err(|e| (e, BackupFate::Delete))?;
+        store::save(&self.workspace_path, &ahead).map_err(|e| (e, BackupFate::Delete))?;
         *ws = ahead;
 
         if let Err(e) = file.write_section(profile, &body) {
@@ -291,7 +290,7 @@ impl Leapp {
             s.start_time = Some(self.config.clock.now());
             s.session_token_expiration = Some(expiration);
         }
-        if let Err(e) = store::save(&self.workspace_path, &without_pending(&next)) {
+        if let Err(e) = store::save(&self.workspace_path, &next) {
             let fate = match restore(file, profile, previous_section.as_deref()) {
                 Ok(()) => self.drop_entry(&mut ws, profile, managed_already),
                 // The file still holds our section. Keep the backup and the entry, so that
@@ -313,7 +312,7 @@ impl Leapp {
         }
         let mut next = ws.clone();
         next.managed_profiles.remove(profile);
-        match store::save(&self.workspace_path, &without_pending(&next)) {
+        match store::save(&self.workspace_path, &next) {
             Ok(()) => {
                 *ws = next;
                 BackupFate::Delete
@@ -361,17 +360,6 @@ fn rollback_all(file: &CredentialsFile, released: &[Released]) {
     for r in released.iter().rev() {
         r.rollback(file);
     }
-}
-
-/// A copy for disk: `Pending` is a state of this run only, so it is saved as `Inactive`.
-fn without_pending(ws: &Workspace) -> Workspace {
-    let mut copy = ws.clone();
-    for s in &mut copy.sessions {
-        if s.status == SessionStatus::Pending {
-            s.status = SessionStatus::Inactive;
-        }
-    }
-    copy
 }
 
 fn backup_key(profile: &str) -> String {

@@ -8,6 +8,20 @@ use leapp_core::{Error, SecretStore, SessionStatus};
 const MINE: &str = "[default]\naws_access_key_id = AKIAUSER\naws_secret_access_key = usersecret\n";
 const BACKUP_KEY: &str = "aws-profile-backup-default";
 
+/// Parses the workspace file text. Tests assert on the parsed JSON, not on the text layout.
+fn parse(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).expect("workspace.json is valid JSON")
+}
+
+fn statuses(ws: &serde_json::Value) -> Vec<String> {
+    ws["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["status"].as_str().unwrap().to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn declined_overwrite_fails_and_keeps_the_file() {
     let h = Harness::new().await;
@@ -334,8 +348,33 @@ async fn write_ahead_save_does_not_persist_pending() {
         .unwrap()
         .clone()
         .expect("hook saw the file write");
-    assert!(on_disk.contains("\"managed_profiles\""));
-    assert!(!on_disk.contains("pending"), "disk must not say pending");
+    let ws = parse(&on_disk);
+    assert!(ws["managed_profiles"].get("default").is_some());
+    assert!(!statuses(&ws).contains(&"pending".to_string()));
+}
+
+/// Every writer goes through one save. Trigger: a start waits on the token call (Pending), and
+/// meanwhile `create_iam_user` saves the workspace.
+#[tokio::test]
+async fn create_during_a_pending_start_does_not_persist_pending() {
+    let h = Harness::new().await;
+    let a = h.leapp.create_iam_user(h.iam_user("a", "default")).unwrap();
+    h.fake
+        .delay_next("GetSessionToken", Duration::from_millis(300));
+
+    let (ra, seen) = tokio::join!(h.leapp.start(a), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            h.leapp.workspace().session(a).unwrap().status,
+            SessionStatus::Pending
+        );
+        h.leapp.create_iam_user(h.iam_user("b", "ci")).unwrap();
+        parse(&h.workspace_text())
+    });
+
+    ra.unwrap();
+    assert_eq!(seen["sessions"].as_array().unwrap().len(), 2);
+    assert!(!statuses(&seen).contains(&"pending".to_string()));
 }
 
 /// Skips a test that needs a failing write when the process ignores folder modes (root).
@@ -370,10 +409,12 @@ async fn failed_file_write_leaves_inactive_on_disk() {
     common::set_mode(&h.home.path().join(".aws"), 0o700);
 
     assert!(result.is_err());
-    let on_disk = h.workspace_text();
-    assert!(!on_disk.contains("pending"), "disk must not say pending");
-    assert!(on_disk.contains("inactive"));
-    assert!(!on_disk.contains("\"default\": {"), "entry must be gone");
+    let on_disk = parse(&h.workspace_text());
+    assert_eq!(statuses(&on_disk), vec!["inactive".to_string()]);
+    assert!(
+        on_disk["managed_profiles"].get("default").is_none(),
+        "entry must be gone"
+    );
     assert_eq!(h.credentials_text().as_deref(), Some(MINE));
     assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
 }
@@ -417,8 +458,9 @@ async fn workspace_lists_the_profile_before_the_file_is_written() {
         .unwrap()
         .clone()
         .expect("hook saw the file write");
-    assert!(
-        on_disk.contains("\"managed_profiles\"") && on_disk.contains("\"had_original\": true"),
+    assert_eq!(
+        parse(&on_disk)["managed_profiles"]["default"]["had_original"],
+        serde_json::Value::Bool(true),
         "workspace.json must list the profile before the file is written"
     );
     // Whatever state the failed start left, the next startup gives the user's section back.
@@ -467,7 +509,11 @@ async fn failed_rollback_keeps_the_backup_and_startup_restores() {
         Some(MINE),
         "the only copy of the user's section must stay"
     );
-    assert!(h.workspace_text().contains("\"default\""));
+    assert!(
+        parse(&h.workspace_text())["managed_profiles"]
+            .get("default")
+            .is_some()
+    );
     assert!(h.credentials_text().unwrap().contains("ASIAFAKE"));
 
     let h = h.reopen();
