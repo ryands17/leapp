@@ -36,6 +36,10 @@ Run all commands in `leapp-rs/`.
 - The headless runtime does not call `setup`, so the harness has no waker. `poll` runs every frame.
 - rune-kit `Dialog::new(k, ..)` keys its panel `<k>-dialog`; `Select::new(k, ..)` keys its trigger `<k>-trigger`.
   The brief's keys (`dlg-iam-user`, `sel-region`) are wrapper elements around them.
+- The overwrite question ignores answers for `CONFIRM_ARM_SECONDS` (0.5 s of harness time) after it
+  comes to the front. UI tests call `h.wait_for_arming()` before they tap `btn-overwrite-yes` or `-no`.
+- `Runtime::wake_deadline()` gives only the earliest wake of all sources (Rune has its own wakes), so
+  a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
 
