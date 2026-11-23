@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "3d4e2dfcecb71890f7f4d6167e82fe6db9dbb695" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "3d4e2dfcecb71890f7f4d6167e82fe6db9dbb695" }
 tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }

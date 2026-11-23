@@ -1,0 +1,16 @@
+[package]
+name = "leapp-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+leapp-core = { path = "../leapp-core" }
+rune = { workspace = true, default-features = true }
+rune-kit = { workspace = true, default-features = true }
+tokio.workspace = true
+
+[dev-dependencies]
+fake-aws = { path = "../fake-aws" }
+tempfile.workspace = true
