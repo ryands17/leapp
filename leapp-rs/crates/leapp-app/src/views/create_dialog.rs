@@ -136,6 +136,12 @@ pub(crate) fn open(s: &mut Ui) {
     s.create.open();
 }
 
+/// Opens the dialog with the region list open too. For the headless scene only.
+pub(crate) fn open_with_region_list(s: &mut Ui) {
+    s.create.open();
+    s.create.region_open = true;
+}
+
 fn cancel(s: &mut Ui) {
     s.create.reset();
 }

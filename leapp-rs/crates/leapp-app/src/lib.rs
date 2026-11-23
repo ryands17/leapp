@@ -207,7 +207,14 @@ fn init() -> Ui {
 /// A named change to the first state, for headless snapshots (`--scene NAME`).
 type Scene = (&'static str, fn(&mut Ui));
 
-const SCENES: &[Scene] = &[("one-session", one_session)];
+const SCENES: &[Scene] = &[
+    ("one-session", one_session),
+    ("create-dialog", views::create_dialog::open),
+    (
+        "create-dialog-region",
+        views::create_dialog::open_with_region_list,
+    ),
+];
 
 /// One inactive IAM User. Needs no AWS: it only writes the workspace and the secret store.
 fn one_session(s: &mut Ui) {
@@ -222,6 +229,17 @@ fn one_session(s: &mut Ui) {
         s.show_error(e.to_string());
     }
     s.refresh();
+}
+
+/// Runs when the window closes, and on Cmd+Q and the Dock quit (Rune calls `on_close` for all
+/// three). Cleans up the managed profiles, then quits. The UI thread waits for the cleanup: it is
+/// local file and keychain work.
+pub fn on_close(s: &mut Ui, tx: &mut Tx) {
+    let leapp = s.leapp.clone();
+    if let Err(e) = s.rt.block_on(async move { leapp.shutdown().await }) {
+        eprintln!("leapp-app: shutdown failed: {e}");
+    }
+    tx.quit();
 }
 
 pub fn spec() -> AppSpec<Ui> {

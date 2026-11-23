@@ -9,7 +9,12 @@ Run all commands in `leapp-rs/`.
 - Test: `cargo test --workspace`
 - Lint: `cargo clippy --workspace --all-targets -- -D warnings`
 - Format check: `cargo fmt --check`
-- Run the app: `cargo run -p leapp-app` (`main.rs` is a stub until Task 8)
+- Run the app: `cargo run -p leapp-app`. It uses the real home folder, the real keychain
+  (service `leapp-rs`) and real AWS. Close the window or press Cmd+Q to quit and clean up.
+- Headless snapshots (no window, no real home, no keychain):
+  `cargo run -p leapp-app -- --snap target/shots/main-empty.png`, add `--scene one-session`,
+  `--scene create-dialog` or `--scene create-dialog-region` for other states
+  (`--list-scenes` lists them). Scenes are in `SCENES` in `crates/leapp-app/src/lib.rs`.
 
 ## Rules
 
@@ -35,6 +40,15 @@ Run all commands in `leapp-rs/`.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
 
 ## Gotchas
+
+- Headless runs (`rune::is_headless()`: `--snap`, `--tree`, `--script`, `--list-scenes`, `--frames`, ...)
+  use a `tempfile::TempDir` home and a `MemoryStore`, so they never touch `~/.aws` or the keychain.
+  `main.rs` keeps the `TempDir` alive for the whole run.
+- Rune runs `App::on_close` for the close button, Cmd+Q and the Dock quit, so `leapp_app::on_close`
+  calls `Leapp::shutdown` for all of them (`block_on` on the UI thread). `on_quit` is not used.
+- If the keychain asks for a password at every build, the debug binary has a new signature each time.
+  Sign it with an Apple Development certificate:
+  `codesign -s "Apple Development: <name>" target/debug/leapp-app` (run it after each build).
 
 - `aws-sdk-sts` needs the `rt-tokio` feature. Without it, the client panics at build time.
 - The pinned `aws-sdk-sts` uses the Query protocol (form body, `Action=...`).
