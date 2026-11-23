@@ -1,6 +1,6 @@
 # Leapp RS F0: carry-forward list
 
-F0 (tracer bullet) is complete on branch `leapp-rs` (commits 6b4cff03..c4176fe4). This file keeps
+F0 (tracer bullet) is complete and merged to `master` on 2026-11-24. This file keeps
 the deferred findings from the per-task reviews and the final whole-branch review, so that the
 plans for later features can include them. Each later plan must read its section below.
 
@@ -32,6 +32,10 @@ plans for later features can include them. Each later plan must read its section
 - Empty state has no "Add session" button.
 - Overwrite dialog: the buttons do not look disabled during the 0.5 s arming delay.
 - Eye toggle on the secret field (spec 14.5), together with the MFA field (ruling R10).
+- `MIN_WINDOW_HEIGHT` (480 px) is not checked against the Create dialog height. Add a test or
+  snapshot of the dialog at the minimum window size (1032x480) before F1 adds the MFA field.
+- The region search test assumes that "eu-w" matches only `eu-west-*` (rune-kit fuzzy match).
+- The region option list is rebuilt on each frame while the dialog is open (about 30 items).
 
 ## F2 (named profiles)
 

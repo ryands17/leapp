@@ -1,5 +1,7 @@
 # Leapp RS F0 (tracer bullet) Implementation Plan
 
+**Status:** complete (merged to `master` on 2026-11-24). The owner checked it against real AWS.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** One IAM User session that you can add, start and stop in a Rune desktop app. Start writes temporary STS credentials to `~/.aws/credentials`. Stop removes them. Profiles that the user wrote by hand are protected.

@@ -599,6 +599,9 @@ tests pass with `cargo test --workspace`, clippy is clean, and the owner saw a d
 
 ### F0. Tracer bullet: one IAM User session, end to end
 
+Status: complete (merged to `master` on 2026-11-24). Deferred items are in
+`docs/superpowers/plans/2026-11-24-leapp-rs-f0-carry-forward.md`.
+
 Scope:
 - `leapp-rs/` Cargo workspace, `rust-toolchain.toml`, `leapp-rs/CLAUDE.md` with commands.
 - `leapp-app` from Rune `examples/hello` (pin a Rune `dev` rev in `Cargo.toml`).
