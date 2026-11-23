@@ -1,10 +1,12 @@
 //! Core logic of Leapp RS.
 
+mod aws_files;
 mod config;
 mod error;
 mod model;
 pub mod regions;
 mod secrets;
+mod sessions;
 mod store;
 
 use std::path::PathBuf;

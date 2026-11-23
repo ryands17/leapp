@@ -1183,6 +1183,7 @@ name = "leapp-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-sdk-sts",
  "chrono",
  "fake-aws",
  "keyring",

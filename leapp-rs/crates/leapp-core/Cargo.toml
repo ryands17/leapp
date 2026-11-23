@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+aws-sdk-sts.workspace = true
 chrono.workspace = true
 keyring.workspace = true
 serde.workspace = true
