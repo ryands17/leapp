@@ -168,3 +168,28 @@ async fn broken_json_file_is_moved_aside() {
     assert_eq!(moved.len(), 1);
     assert_eq!(std::fs::read_to_string(&moved[0]).unwrap(), "{not json");
 }
+
+#[tokio::test]
+async fn debug_output_of_new_iam_user_hides_the_keys() {
+    let h = Harness::new().await;
+    let text = format!("{:?}", h.iam_user("dev", "default"));
+    assert!(!text.contains("SECRET-dev"), "{text}");
+    assert!(!text.contains("AKID-dev"), "{text}");
+    assert!(text.contains("dev"), "{text}");
+}
+
+#[tokio::test]
+async fn failed_save_leaves_no_secrets_and_no_session() {
+    let h = Harness::new().await;
+    // A folder at the workspace path makes the final rename fail on macOS and Linux.
+    std::fs::create_dir_all(h.workspace_path()).unwrap();
+
+    let before = h.leapp.workspace();
+    let result = h.leapp.create_iam_user(h.iam_user("dev", "newprofile"));
+
+    assert!(result.is_err());
+    assert!(h.secrets.snapshot().is_empty());
+    let ws = h.leapp.workspace();
+    assert!(ws.sessions.is_empty());
+    assert_eq!(ws.profiles, before.profiles);
+}

@@ -62,39 +62,48 @@ impl Leapp {
 
         let id = Uuid::new_v4();
         let secrets = &self.config.secrets;
-        secrets.set(&format!("iam-user-{id}-access-key-id"), access_key_id)?;
-        secrets.set(
-            &format!("iam-user-{id}-secret-access-key"),
-            secret_access_key,
-        )?;
+        let key_id_key = format!("iam-user-{id}-access-key-id");
+        let secret_key = format!("iam-user-{id}-secret-access-key");
+        let result = (|| -> Result<()> {
+            secrets.set(&key_id_key, access_key_id)?;
+            secrets.set(&secret_key, secret_access_key)?;
 
-        let mut ws = self.workspace.lock().unwrap();
-        let profile_id = match ws.profiles.iter().find(|p| p.name == profile) {
-            Some(p) => p.id,
-            None => {
-                let p = NamedProfile {
-                    id: Uuid::new_v4(),
-                    name: profile.to_string(),
-                };
-                let pid = p.id;
-                ws.profiles.push(p);
-                pid
-            }
-        };
-        ws.sessions.push(Session {
-            id,
-            name: name.to_string(),
-            region: req.region,
-            profile_id,
-            status: SessionStatus::Inactive,
-            start_time: None,
-            session_token_expiration: None,
-            kind: SessionKind::IamUser {
-                mfa_device: None,
-                account: None,
-            },
-        });
-        store::save(&self.workspace_path, &ws)?;
+            let mut ws = self.workspace.lock().unwrap();
+            let mut next = ws.clone();
+            let profile_id = match next.profiles.iter().find(|p| p.name == profile) {
+                Some(p) => p.id,
+                None => {
+                    let p = NamedProfile {
+                        id: Uuid::new_v4(),
+                        name: profile.to_string(),
+                    };
+                    let pid = p.id;
+                    next.profiles.push(p);
+                    pid
+                }
+            };
+            next.sessions.push(Session {
+                id,
+                name: name.to_string(),
+                region: req.region.clone(),
+                profile_id,
+                status: SessionStatus::Inactive,
+                start_time: None,
+                session_token_expiration: None,
+                kind: SessionKind::IamUser {
+                    mfa_device: None,
+                    account: None,
+                },
+            });
+            store::save(&self.workspace_path, &next)?;
+            *ws = next;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let _ = secrets.delete(&key_id_key);
+            let _ = secrets.delete(&secret_key);
+            return Err(e);
+        }
         Ok(id)
     }
 }

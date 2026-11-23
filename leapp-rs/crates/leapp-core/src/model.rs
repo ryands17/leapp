@@ -91,11 +91,23 @@ pub struct ManagedProfile {
     pub had_original: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NewIamUser {
     pub name: String,
     pub access_key_id: String,
     pub secret_access_key: String,
     pub profile_name: String,
     pub region: String,
+}
+
+impl std::fmt::Debug for NewIamUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewIamUser")
+            .field("name", &self.name)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field("profile_name", &self.profile_name)
+            .field("region", &self.region)
+            .finish()
+    }
 }

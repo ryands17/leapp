@@ -46,6 +46,7 @@ pub fn save(path: &Path, workspace: &Workspace) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     file.write_all(&serde_json::to_vec_pretty(workspace)?)?;
+    file.as_file().sync_all()?;
     file.persist(path).map_err(|e| Error::Io(e.error))?;
     Ok(())
 }
