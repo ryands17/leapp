@@ -14,6 +14,10 @@ use crate::store;
 impl Leapp {
     /// Starts a session: stops other sessions on the same profile, gets credentials, writes the
     /// profile section. On error the status is `Inactive` and the credentials file is unchanged.
+    ///
+    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
+    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
+    /// thread).
     pub async fn start(&self, id: SessionId) -> Result<()> {
         let (profile_id, profile, to_stop) = {
             let ws = self.workspace.lock().unwrap();
@@ -51,6 +55,10 @@ impl Leapp {
 
     /// Stops a session: puts its profile section back as it was (the user's saved section, or
     /// none). Does nothing if it is `Inactive`. A `Pending` session cannot be stopped.
+    ///
+    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
+    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
+    /// thread).
     pub async fn stop(&self, id: SessionId) -> Result<()> {
         let mut ws = self.workspace.lock().unwrap();
         let session = ws.session(id).ok_or(Error::NotFound(id))?;
@@ -76,11 +84,19 @@ impl Leapp {
 
     /// Cleans up after a crash: every managed profile is restored or removed, every session is
     /// set to `Inactive`.
+    ///
+    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
+    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
+    /// thread).
     pub async fn startup(&self) -> Result<()> {
         self.clean_all()
     }
 
     /// Same cleanup as `startup`, for a normal exit.
+    ///
+    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
+    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
+    /// thread).
     pub async fn shutdown(&self) -> Result<()> {
         self.clean_all()
     }
@@ -181,6 +197,15 @@ impl Leapp {
             match file.sections_named(profile)? {
                 0 => {}
                 1 => {
+                    let key = backup_key(profile);
+                    // A backup under this key that no managed profile owns is the only copy of an
+                    // earlier user section. Never overwrite it.
+                    if secrets.get(&key)?.is_some() {
+                        return Err(Error::Secret(format!(
+                            "a backup for profile \"{profile}\" already exists in the secret \
+                             store and was not removed; not overwriting it"
+                        )));
+                    }
                     if !self
                         .config
                         .prompter
@@ -190,7 +215,6 @@ impl Leapp {
                         return Err(Error::ProfileOverwriteDeclined(profile.to_string()));
                     }
                     if let Some(text) = file.section_text(profile)? {
-                        let key = backup_key(profile);
                         secrets.set(&key, &text)?;
                         new_backup = Some(key);
                         had_original = true;
@@ -200,17 +224,27 @@ impl Leapp {
             }
         }
 
-        let result = self
-            .write_active(id, profile, &session, &file, had_original)
-            .await;
-        if result.is_err()
-            && let Some(key) = new_backup
+        match self
+            .write_active(id, profile, &session, &file, had_original, managed_already)
+            .await
         {
-            let _ = secrets.delete(&key);
+            Ok(()) => Ok(()),
+            Err((e, fate)) => {
+                // The backup is the only copy of the user's section. Delete it only if the
+                // credentials file and the workspace are back to how they were before.
+                if fate == BackupFate::Delete
+                    && let Some(key) = new_backup
+                {
+                    let _ = secrets.delete(&key);
+                }
+                Err(e)
+            }
         }
-        result
     }
 
+    /// Write-ahead order: the managed entry is saved before the file is written, so a crash
+    /// after the file write still lets `startup` put the user's section back from the backup.
+    /// On error, the second value says if the caller may delete the backup.
     async fn write_active(
         &self,
         id: SessionId,
@@ -218,35 +252,80 @@ impl Leapp {
         session: &crate::model::Session,
         file: &CredentialsFile,
         had_original: bool,
-    ) -> Result<()> {
+        managed_already: bool,
+    ) -> std::result::Result<(), (Error, BackupFate)> {
         let (body, expiration) = match session.kind {
-            SessionKind::IamUser { .. } => self.iam_user_credentials(session).await?,
+            SessionKind::IamUser { .. } => self
+                .iam_user_credentials(session)
+                .await
+                .map_err(|e| (e, BackupFate::Delete))?,
         };
 
         let mut ws = self.workspace.lock().unwrap();
-        let previous_section = file.section_text(profile)?;
-        file.write_section(profile, &body)?;
+        let previous_section = file
+            .section_text(profile)
+            .map_err(|e| (e, BackupFate::Delete))?;
 
-        let mut next = ws.clone();
-        next.managed_profiles.insert(
+        // Save the entry first. The session stays `Pending`; `startup` resets it.
+        let mut ahead = ws.clone();
+        ahead.managed_profiles.insert(
             profile.to_string(),
             ManagedProfile {
                 session_id: id,
                 had_original,
             },
         );
+        store::save(&self.workspace_path, &ahead).map_err(|e| (e, BackupFate::Delete))?;
+        *ws = ahead;
+
+        if let Err(e) = file.write_section(profile, &body) {
+            let fate = self.drop_entry(&mut ws, profile, managed_already);
+            return Err((e, fate));
+        }
+
+        let mut next = ws.clone();
         if let Some(s) = next.sessions.iter_mut().find(|s| s.id == id) {
             s.status = SessionStatus::Active;
             s.start_time = Some(self.config.clock.now());
             s.session_token_expiration = Some(expiration);
         }
         if let Err(e) = store::save(&self.workspace_path, &next) {
-            restore(file, profile, previous_section);
-            return Err(e);
+            let fate = match restore(file, profile, previous_section.as_deref()) {
+                Ok(()) => self.drop_entry(&mut ws, profile, managed_already),
+                // The file still holds our section. Keep the backup and the entry, so that
+                // `startup` can try again. The error of the save is returned.
+                Err(_) => BackupFate::Keep,
+            };
+            return Err((e, fate));
         }
         *ws = next;
         Ok(())
     }
+
+    /// Takes the write-ahead entry out again after the file is back to how it was. An entry that
+    /// existed before this start stays. If the save fails, the entry stays on disk and the backup
+    /// must stay too, because `startup` restores from it.
+    fn drop_entry(&self, ws: &mut Workspace, profile: &str, managed_already: bool) -> BackupFate {
+        if managed_already {
+            return BackupFate::Delete;
+        }
+        let mut next = ws.clone();
+        next.managed_profiles.remove(profile);
+        match store::save(&self.workspace_path, &next) {
+            Ok(()) => {
+                *ws = next;
+                BackupFate::Delete
+            }
+            Err(_) => BackupFate::Keep,
+        }
+    }
+}
+
+/// Whether a failed start may delete the backup of the user's section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackupFate {
+    Delete,
+    Keep,
 }
 
 /// What `release_profile` changed, so that a failed save can undo it.
@@ -258,9 +337,11 @@ struct Released {
 }
 
 impl Released {
+    /// Puts the section back after a failed save. The save error is the one the caller returns,
+    /// so an error here is dropped; the backup is kept, because `finish` runs only after a save.
     fn rollback(&self, file: &CredentialsFile) {
         if self.changed {
-            restore(file, &self.profile, self.previous_section.clone());
+            let _ = restore(file, &self.profile, self.previous_section.as_deref());
         }
     }
 
@@ -315,11 +396,10 @@ fn set_status(ws: &mut Workspace, id: SessionId, status: SessionStatus) {
     }
 }
 
-/// Puts the section back as it was, after a failed save. The error of the save is more important
-/// than an error here, so this one is dropped.
-fn restore(file: &CredentialsFile, profile: &str, previous_section: Option<String>) {
-    let _ = match previous_section {
-        Some(text) => file.write_raw_section(profile, &text),
+/// Puts the section back as it was, after a failed save.
+fn restore(file: &CredentialsFile, profile: &str, previous_section: Option<&str>) -> Result<()> {
+    match previous_section {
+        Some(text) => file.write_raw_section(profile, text),
         None => file.remove_section(profile),
-    };
+    }
 }

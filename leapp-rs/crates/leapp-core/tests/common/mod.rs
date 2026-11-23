@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fake_aws::FakeAws;
-use leapp_core::{Config, Leapp, MemoryStore, NewIamUser, Prompter};
+use leapp_core::{Clock, Config, Leapp, MemoryStore, NewIamUser, Prompter};
 use tempfile::TempDir;
 
 pub struct ScriptedPrompter {
@@ -42,6 +42,16 @@ pub struct Harness {
 
 impl Harness {
     pub async fn new() -> Harness {
+        Self::build(|_| None).await
+    }
+
+    /// Like `new`, with a clock chosen from the temp home folder. The clock is the only hook that
+    /// runs between the file write and the last workspace save of `start`.
+    pub async fn with_clock(make: impl FnOnce(&Path) -> Arc<dyn Clock>) -> Harness {
+        Self::build(|home| Some(make(home))).await
+    }
+
+    async fn build(clock: impl FnOnce(&Path) -> Option<Arc<dyn Clock>>) -> Harness {
         let home = TempDir::new().unwrap();
         let fake = FakeAws::start().await;
         let secrets = Arc::new(MemoryStore::default());
@@ -49,7 +59,11 @@ impl Harness {
             answer: AtomicBool::new(true),
             asked: Mutex::new(Vec::new()),
         });
-        let leapp = Leapp::open(Self::config(&home, &secrets, &prompter, &fake)).unwrap();
+        let mut config = Self::config(&home, &secrets, &prompter, &fake);
+        if let Some(clock) = clock(home.path()) {
+            config.clock = clock;
+        }
+        let leapp = Leapp::open(config).unwrap();
         Harness {
             home,
             secrets,
@@ -121,4 +135,21 @@ impl Harness {
             region: "eu-west-1".to_string(),
         }
     }
+}
+
+/// A clock that runs a hook on every call. Tests use it to break the disk at a chosen moment.
+pub struct HookClock<F: Fn() + Send + Sync>(pub F);
+
+impl<F: Fn() + Send + Sync> Clock for HookClock<F> {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        (self.0)();
+        chrono::Utc::now()
+    }
+}
+
+/// Sets the mode of a folder. Unix only; the tests that use it are `#[cfg(unix)]`.
+#[cfg(unix)]
+pub fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
