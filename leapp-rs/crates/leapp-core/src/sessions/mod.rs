@@ -111,9 +111,11 @@ impl Leapp {
     /// flight (for example one that waits on AWS) fails with `Error::Closing` before it writes,
     /// and later starts fail the same way.
     ///
-    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
-    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
-    /// thread).
+    /// This function does blocking file and keychain I/O while it holds the workspace lock. The
+    /// UI calls it on the render thread, with `block_on` in `on_close`, because the window must
+    /// not close before the cleanup ends. That is acceptable: the work is local (the credentials
+    /// file, `workspace.json` and the keychain), with no network call. A keychain prompt can
+    /// keep the window open until the user answers it.
     pub async fn shutdown(&self) -> Result<()> {
         self.clean_all(true)
     }
