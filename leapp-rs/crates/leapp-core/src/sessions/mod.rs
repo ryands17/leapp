@@ -22,7 +22,7 @@ impl Leapp {
     /// it from a task that may block (the UI calls it from its tokio bridge, not the render
     /// thread).
     pub async fn start(&self, id: SessionId) -> Result<()> {
-        let (profile_id, profile, to_stop) = {
+        let (profile_id, profile, to_stop, consent_carried) = {
             let ws = self.workspace.lock().unwrap();
             if self.closing.load(Ordering::SeqCst) {
                 return Err(Error::Closing);
@@ -38,7 +38,13 @@ impl Leapp {
                 .filter(|s| s.profile_id == session.profile_id && s.status == SessionStatus::Active)
                 .map(|s| s.id)
                 .collect();
-            (session.profile_id, profile, to_stop)
+            // Spec 9.3 step 5: the user agreed to the overwrite of this profile when the session
+            // we stop now started. That consent carries over to this start: no second question.
+            let consent_carried = ws
+                .managed_profiles
+                .get(&profile)
+                .is_some_and(|m| m.had_original && to_stop.contains(&m.session_id));
+            (session.profile_id, profile, to_stop, consent_carried)
         };
         for other in to_stop {
             self.stop(other).await?;
@@ -54,7 +60,7 @@ impl Leapp {
             set_status(&mut ws, id, SessionStatus::Pending);
         }
 
-        let result = self.activate(id, &profile).await;
+        let result = self.activate(id, &profile, consent_carried).await;
         if result.is_err() {
             let mut ws = self.workspace.lock().unwrap();
             set_status(&mut ws, id, SessionStatus::Inactive);
@@ -195,7 +201,11 @@ impl Leapp {
     /// Steps 3 to 7 of spec 10.1 and 9.3. Changes the file and the workspace together or not at
     /// all. The backup of the user's section is deleted on failure only when the file and the
     /// workspace are back as before; else it stays, because it is the only copy.
-    async fn activate(&self, id: SessionId, profile: &str) -> Result<()> {
+    ///
+    /// With `consent_carried`, the user already agreed to replace the section of `profile` (a
+    /// session switch on the same profile), so it does not ask again. The section that the stop
+    /// put back is saved again as the backup.
+    async fn activate(&self, id: SessionId, profile: &str, consent_carried: bool) -> Result<()> {
         let (session, existing) = {
             let ws = self.workspace.lock().unwrap();
             (
@@ -222,11 +232,12 @@ impl Leapp {
                     {
                         return Err(Error::BackupConflict(profile.to_string()));
                     }
-                    if !self
-                        .config
-                        .prompter
-                        .confirm_profile_overwrite(profile)
-                        .await
+                    if !consent_carried
+                        && !self
+                            .config
+                            .prompter
+                            .confirm_profile_overwrite(profile)
+                            .await
                     {
                         return Err(Error::ProfileOverwriteDeclined(profile.to_string()));
                     }

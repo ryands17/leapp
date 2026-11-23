@@ -93,19 +93,39 @@ async fn failed_start_after_accepted_overwrite_removes_the_backup() {
     assert!(h.leapp.workspace().managed_profiles.is_empty());
 }
 
+/// Spec 9.3 step 5: the user said yes for this profile once. A switch to another session on the
+/// same profile keeps that consent, and the user's section still comes back at the end.
 #[tokio::test]
 async fn own_managed_profile_does_not_ask_again() {
     let h = Harness::new().await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
     let a = h.leapp.create_iam_user(h.iam_user("a", "default")).unwrap();
     let b = h.leapp.create_iam_user(h.iam_user("b", "default")).unwrap();
 
     h.leapp.start(a).await.unwrap();
+    // A "no" now would make the switch fail: only a second question can see it.
+    h.prompter.answer(false);
     h.leapp.start(b).await.unwrap();
 
-    assert!(h.prompter.asked().is_empty());
+    assert_eq!(h.prompter.asked(), vec!["default".to_string()]);
     let ws = h.leapp.workspace();
     assert_eq!(ws.session(a).unwrap().status, SessionStatus::Inactive);
     assert_eq!(ws.session(b).unwrap().status, SessionStatus::Active);
+    assert!(ws.managed_profiles["default"].had_original);
+    let text = h.credentials_text().unwrap();
+    assert!(text.contains("ASIAFAKE0002"), "{text}");
+    assert!(!text.contains("ASIAFAKE0001") && !text.contains("AKIAUSER"));
+    assert_eq!(
+        h.secrets.snapshot().get(BACKUP_KEY).map(String::as_str),
+        Some(MINE)
+    );
+
+    h.leapp.stop(b).await.unwrap();
+
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+    assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
+    assert!(h.leapp.workspace().managed_profiles.is_empty());
 }
 
 #[tokio::test]
