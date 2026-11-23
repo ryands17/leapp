@@ -2,6 +2,8 @@
 
 mod iam_user;
 
+use std::sync::atomic::Ordering;
+
 use uuid::Uuid;
 
 use crate::Leapp;
@@ -14,6 +16,7 @@ use crate::store;
 impl Leapp {
     /// Starts a session: stops other sessions on the same profile, gets credentials, writes the
     /// profile section. On error the status is `Inactive` and the credentials file is unchanged.
+    /// After `shutdown` began, it returns `Error::Closing` and changes nothing.
     ///
     /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
     /// it from a task that may block (the UI calls it from its tokio bridge, not the render
@@ -21,6 +24,9 @@ impl Leapp {
     pub async fn start(&self, id: SessionId) -> Result<()> {
         let (profile_id, profile, to_stop) = {
             let ws = self.workspace.lock().unwrap();
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(Error::Closing);
+            }
             let session = ws.session(id).ok_or(Error::NotFound(id))?;
             let profile = profile_name(&ws, session.profile_id)?;
             if pending_on(&ws, session.profile_id) {
@@ -39,6 +45,9 @@ impl Leapp {
         }
         {
             let mut ws = self.workspace.lock().unwrap();
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(Error::Closing);
+            }
             if pending_on(&ws, profile_id) {
                 return Err(pending_error());
             }
@@ -89,20 +98,27 @@ impl Leapp {
     /// it from a task that may block (the UI calls it from its tokio bridge, not the render
     /// thread).
     pub async fn startup(&self) -> Result<()> {
-        self.clean_all()
+        self.clean_all(false)
     }
 
-    /// Same cleanup as `startup`, for a normal exit.
+    /// Same cleanup as `startup`, for a normal exit. It is final: a start that is still in
+    /// flight (for example one that waits on AWS) fails with `Error::Closing` before it writes,
+    /// and later starts fail the same way.
     ///
     /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
     /// it from a task that may block (the UI calls it from its tokio bridge, not the render
     /// thread).
     pub async fn shutdown(&self) -> Result<()> {
-        self.clean_all()
+        self.clean_all(true)
     }
 
-    fn clean_all(&self) -> Result<()> {
+    /// With `closing`, sets the closing flag under the lock first, so no start can write after
+    /// the cleanup.
+    fn clean_all(&self, closing: bool) -> Result<()> {
         let mut ws = self.workspace.lock().unwrap();
+        if closing {
+            self.closing.store(true, Ordering::SeqCst);
+        }
         let file = CredentialsFile::new(&self.config.home_dir);
         let mut next = ws.clone();
         let managed: Vec<(String, SessionId)> = next
@@ -262,6 +278,11 @@ impl Leapp {
         };
 
         let mut ws = self.workspace.lock().unwrap();
+        // `shutdown` cleaned up while we waited. Nothing is written yet, so the new backup (if
+        // any) is a copy of the section that is still in the file and may go.
+        if self.closing.load(Ordering::SeqCst) {
+            return Err((Error::Closing, BackupFate::Delete));
+        }
         let previous_section = file
             .section_text(profile)
             .map_err(|e| (e, BackupFate::Delete))?;

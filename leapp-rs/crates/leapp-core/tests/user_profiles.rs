@@ -522,3 +522,47 @@ async fn failed_rollback_keeps_the_backup_and_startup_restores() {
     assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
     assert!(h.leapp.workspace().managed_profiles.is_empty());
 }
+
+/// Quit is final. Trigger: `shutdown` runs while a start waits on the token call. The start
+/// must then fail and leave the user's section, the workspace and the keychain as before.
+#[tokio::test]
+async fn shutdown_during_a_start_leaves_nothing_behind() {
+    let h = Harness::new().await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    h.fake
+        .delay_next("GetSessionToken", Duration::from_millis(300));
+
+    let (started, shut) = tokio::join!(h.leapp.start(id), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            h.leapp.workspace().session(id).unwrap().status,
+            SessionStatus::Pending,
+            "shutdown must run while the start waits on AWS"
+        );
+        h.leapp.shutdown().await
+    });
+
+    shut.unwrap();
+    assert!(matches!(started, Err(Error::Closing)), "{started:?}");
+    assert_eq!(h.fake.count("GetSessionToken"), 1);
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+    assert!(h.leapp.workspace().managed_profiles.is_empty());
+    let on_disk = parse(&h.workspace_text());
+    assert!(
+        on_disk["managed_profiles"]
+            .as_object()
+            .is_none_or(|m| m.is_empty()),
+        "{on_disk}"
+    );
+    assert_eq!(statuses(&on_disk), vec!["inactive".to_string()]);
+    assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
+
+    // A start after shutdown is refused before it changes anything.
+    assert!(matches!(h.leapp.start(id).await, Err(Error::Closing)));
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+}

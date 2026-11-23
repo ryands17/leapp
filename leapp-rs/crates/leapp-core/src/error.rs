@@ -23,6 +23,8 @@ pub enum Error {
          ~/.aws/credentials or delete the keychain item, then try again."
     )]
     BackupConflict(String),
+    #[error("Leapp RS is closing, so the session did not start")]
+    Closing,
     #[error("workspace file version {0} is newer than this app supports")]
     UnsupportedVersion(u32),
     #[error("secret store error: {0}")]

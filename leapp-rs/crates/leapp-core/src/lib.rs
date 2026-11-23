@@ -11,6 +11,7 @@ mod store;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 use uuid::Uuid;
 
@@ -26,6 +27,10 @@ pub struct Leapp {
     config: Config,
     workspace_path: PathBuf,
     workspace: Mutex<Workspace>,
+    /// Set by `shutdown`. After it is set, no start writes the credentials file, the workspace
+    /// or a backup. Read and written only while the `workspace` lock is held, so a start sees
+    /// it before its write-ahead save or not at all.
+    closing: AtomicBool,
 }
 
 impl Leapp {
@@ -36,6 +41,7 @@ impl Leapp {
             config,
             workspace_path,
             workspace: Mutex::new(workspace),
+            closing: AtomicBool::new(false),
         })
     }
 
