@@ -17,6 +17,12 @@ pub enum Error {
     ProfilePending(String),
     #[error("profile section \"{0}\" is in the credentials file more than one time")]
     DuplicateProfileSection(String),
+    #[error(
+        "a saved copy of profile \"{0}\" is in the keychain item \"aws-profile-backup-{0}\" \
+         (service leapp-rs) and differs from ~/.aws/credentials. Restore it to \
+         ~/.aws/credentials or delete the keychain item, then try again."
+    )]
+    BackupConflict(String),
     #[error("workspace file version {0} is newer than this app supports")]
     UnsupportedVersion(u32),
     #[error("secret store error: {0}")]

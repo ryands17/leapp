@@ -270,8 +270,10 @@ async fn orphan_backup_is_never_overwritten() {
 
     let err = h.leapp.start(id).await.unwrap_err();
 
-    assert!(matches!(err, Error::Secret(_)));
-    assert!(!err.to_string().contains("ORIGINAL"));
+    assert!(matches!(&err, Error::BackupConflict(p) if p == "default"));
+    let text = err.to_string();
+    assert!(text.contains(BACKUP_KEY) && text.contains("leapp-rs"));
+    assert!(!text.contains("ORIGINAL") && !text.contains("usersecret"));
     assert_eq!(
         h.secrets.snapshot().get(BACKUP_KEY).map(String::as_str),
         Some("ORIGINAL")
@@ -284,11 +286,106 @@ async fn orphan_backup_is_never_overwritten() {
     );
 }
 
+#[tokio::test]
+async fn stale_orphan_backup_equal_to_the_file_is_reused() {
+    let h = Harness::new().await;
+    h.write_credentials(MINE);
+    h.secrets.set(BACKUP_KEY, MINE).unwrap();
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+
+    h.leapp.start(id).await.unwrap();
+    assert!(h.credentials_text().unwrap().contains("ASIAFAKE0001"));
+    h.leapp.stop(id).await.unwrap();
+
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+    assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
+}
+
+/// The write-ahead save must not put `pending` on disk. Trigger: the clock is read after the
+/// file write, when the write-ahead save is the newest workspace.json.
+#[tokio::test]
+async fn write_ahead_save_does_not_persist_pending() {
+    use std::sync::{Arc, Mutex};
+    let seen = Arc::new(Mutex::new(None::<String>));
+    let seen_in_hook = seen.clone();
+    let h = Harness::with_clock(|home| {
+        let home = home.to_path_buf();
+        Arc::new(common::HookClock(move || {
+            let creds = home.join(".aws").join("credentials");
+            if std::fs::read_to_string(creds).is_ok_and(|t| t.contains("ASIAFAKE")) {
+                *seen_in_hook.lock().unwrap() =
+                    std::fs::read_to_string(home.join(".leapp-rs").join("workspace.json")).ok();
+            }
+        }))
+    })
+    .await;
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+
+    h.leapp.start(id).await.unwrap();
+
+    let on_disk = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("hook saw the file write");
+    assert!(on_disk.contains("\"managed_profiles\""));
+    assert!(!on_disk.contains("pending"), "disk must not say pending");
+}
+
+/// Skips a test that needs a failing write when the process ignores folder modes (root).
+#[cfg(unix)]
+fn modes_are_ignored() -> bool {
+    let dir = tempfile::TempDir::new().unwrap();
+    common::set_mode(dir.path(), 0o500);
+    let ignored = std::fs::write(dir.path().join("probe"), "x").is_ok();
+    common::set_mode(dir.path(), 0o700);
+    if ignored {
+        eprintln!("skipped: this process ignores folder modes");
+    }
+    ignored
+}
+
+/// File write fails after the write-ahead save. Trigger: `.aws` is read-only before the start.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_file_write_leaves_inactive_on_disk() {
+    if modes_are_ignored() {
+        return;
+    }
+    let h = Harness::new().await;
+    h.write_credentials(MINE);
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    common::set_mode(&h.home.path().join(".aws"), 0o500);
+
+    let result = h.leapp.start(id).await;
+    common::set_mode(&h.home.path().join(".aws"), 0o700);
+
+    assert!(result.is_err());
+    let on_disk = h.workspace_text();
+    assert!(!on_disk.contains("pending"), "disk must not say pending");
+    assert!(on_disk.contains("inactive"));
+    assert!(!on_disk.contains("\"default\": {"), "entry must be gone");
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+    assert!(!h.secrets.snapshot().contains_key(BACKUP_KEY));
+}
+
 /// Final save fails after the file write. Trigger: the clock is read after the file write and
 /// before the last save; there it makes the workspace folder read-only.
 #[cfg(unix)]
 #[tokio::test]
 async fn workspace_lists_the_profile_before_the_file_is_written() {
+    if modes_are_ignored() {
+        return;
+    }
     use std::sync::{Arc, Mutex};
     let seen = Arc::new(Mutex::new(None::<String>));
     let seen_in_hook = seen.clone();
@@ -337,6 +434,9 @@ async fn workspace_lists_the_profile_before_the_file_is_written() {
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_rollback_keeps_the_backup_and_startup_restores() {
+    if modes_are_ignored() {
+        return;
+    }
     use std::sync::Arc;
     let h = Harness::with_clock(|home| {
         let home = home.to_path_buf();

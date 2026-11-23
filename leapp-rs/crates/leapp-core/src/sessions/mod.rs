@@ -176,9 +176,9 @@ impl Leapp {
         Ok(released)
     }
 
-    /// Steps 3 to 7 of spec 10.1 and 9.3. Changes the file, the workspace and the secret store
-    /// together or not at all (except the backup of the user's section, which is deleted again
-    /// on failure).
+    /// Steps 3 to 7 of spec 10.1 and 9.3. Changes the file and the workspace together or not at
+    /// all. The backup of the user's section is deleted on failure only when the file and the
+    /// workspace are back as before; else it stays, because it is the only copy.
     async fn activate(&self, id: SessionId, profile: &str) -> Result<()> {
         let (session, existing) = {
             let ws = self.workspace.lock().unwrap();
@@ -198,13 +198,13 @@ impl Leapp {
                 0 => {}
                 1 => {
                     let key = backup_key(profile);
-                    // A backup under this key that no managed profile owns is the only copy of an
-                    // earlier user section. Never overwrite it.
-                    if secrets.get(&key)?.is_some() {
-                        return Err(Error::Secret(format!(
-                            "a backup for profile \"{profile}\" already exists in the secret \
-                             store and was not removed; not overwriting it"
-                        )));
+                    // A backup under this key that no managed profile owns may be the only copy
+                    // of an earlier user section. Overwrite it only if it equals the section in
+                    // the file now (a stale copy: no data can be lost). Else the user decides.
+                    if let Some(saved) = secrets.get(&key)?
+                        && file.section_text(profile)?.as_deref() != Some(saved.as_str())
+                    {
+                        return Err(Error::BackupConflict(profile.to_string()));
                     }
                     if !self
                         .config
@@ -266,7 +266,8 @@ impl Leapp {
             .section_text(profile)
             .map_err(|e| (e, BackupFate::Delete))?;
 
-        // Save the entry first. The session stays `Pending`; `startup` resets it.
+        // Save the entry first. In memory the session stays `Pending`; on disk it is `Inactive`,
+        // so that a crash leaves no `Pending` status.
         let mut ahead = ws.clone();
         ahead.managed_profiles.insert(
             profile.to_string(),
@@ -275,7 +276,8 @@ impl Leapp {
                 had_original,
             },
         );
-        store::save(&self.workspace_path, &ahead).map_err(|e| (e, BackupFate::Delete))?;
+        store::save(&self.workspace_path, &without_pending(&ahead))
+            .map_err(|e| (e, BackupFate::Delete))?;
         *ws = ahead;
 
         if let Err(e) = file.write_section(profile, &body) {
@@ -289,7 +291,7 @@ impl Leapp {
             s.start_time = Some(self.config.clock.now());
             s.session_token_expiration = Some(expiration);
         }
-        if let Err(e) = store::save(&self.workspace_path, &next) {
+        if let Err(e) = store::save(&self.workspace_path, &without_pending(&next)) {
             let fate = match restore(file, profile, previous_section.as_deref()) {
                 Ok(()) => self.drop_entry(&mut ws, profile, managed_already),
                 // The file still holds our section. Keep the backup and the entry, so that
@@ -311,7 +313,7 @@ impl Leapp {
         }
         let mut next = ws.clone();
         next.managed_profiles.remove(profile);
-        match store::save(&self.workspace_path, &next) {
+        match store::save(&self.workspace_path, &without_pending(&next)) {
             Ok(()) => {
                 *ws = next;
                 BackupFate::Delete
@@ -345,8 +347,9 @@ impl Released {
         }
     }
 
-    /// Deletes the backup. The workspace is already saved, so an error here is dropped; the
-    /// next backup of the same profile overwrites the key.
+    /// Deletes the backup. The workspace is already saved, so an error here is dropped. The
+    /// backup then stays as an orphan. The next start on the profile reuses it if it equals the
+    /// user's section, and else returns `Error::BackupConflict`.
     fn finish(&self, secrets: &dyn SecretStore) {
         if let Some(key) = &self.backup_key {
             let _ = secrets.delete(key);
@@ -358,6 +361,17 @@ fn rollback_all(file: &CredentialsFile, released: &[Released]) {
     for r in released.iter().rev() {
         r.rollback(file);
     }
+}
+
+/// A copy for disk: `Pending` is a state of this run only, so it is saved as `Inactive`.
+fn without_pending(ws: &Workspace) -> Workspace {
+    let mut copy = ws.clone();
+    for s in &mut copy.sessions {
+        if s.status == SessionStatus::Pending {
+            s.status = SessionStatus::Inactive;
+        }
+    }
+    copy
 }
 
 fn backup_key(profile: &str) -> String {
