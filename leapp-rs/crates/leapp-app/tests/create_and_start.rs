@@ -2,6 +2,7 @@ mod common;
 
 use common::AppHarness;
 use leapp_core::regions::REGIONS;
+use rune::Key;
 
 fn fill(h: &mut AppHarness, name: &str, key_id: &str, secret: &str) {
     for (field, value) in [
@@ -97,20 +98,56 @@ fn the_form_starts_with_default_profile_and_region() {
 }
 
 #[test]
-fn a_chosen_region_is_used() {
+fn typing_in_the_region_search_shows_only_matching_regions() {
     let mut h = AppHarness::new();
     h.tap("btn-create");
-    h.tap("sel-region-trigger");
-    h.frames(30);
-    // The list scrolls; the first options are the ones in view.
-    let region = REGIONS[1];
-    assert_ne!(region, "us-east-1");
-    h.tap("option1");
+    h.tap("sel-region-value-trigger");
+    h.type_text("eu-w");
+    h.frames(10);
+
+    let shown = h.keys_with_prefix("sel-region-option-");
+    let mut want: Vec<String> = REGIONS
+        .iter()
+        .filter(|r| r.starts_with("eu-west-"))
+        .map(|r| format!("sel-region-option-{r}"))
+        .collect();
+    let mut got = shown.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "only the eu-west regions are listed");
+}
+
+#[test]
+fn a_region_found_by_search_is_used() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    h.tap("sel-region-value-trigger");
+    h.type_text("ap-southeast-2");
+    h.frames(10);
+    h.tap("sel-region-option-ap-southeast-2");
+    assert_eq!(h.rt.state.create_form().region(), "ap-southeast-2");
+
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.tap("btn-create-submit");
     h.settle(|ui| ui.workspace().sessions.len() == 1);
 
-    assert_eq!(h.leapp.workspace().sessions[0].region, region);
+    assert_eq!(h.leapp.workspace().sessions[0].region, "ap-southeast-2");
+}
+
+#[test]
+fn enter_in_the_region_search_picks_the_first_match() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    h.tap("sel-region-value-trigger");
+    h.type_text("eu-north-1");
+    h.frames(10);
+    h.press(Key::Enter);
+
+    assert_eq!(h.rt.state.create_form().region(), "eu-north-1");
+    assert!(
+        h.keys_with_prefix("sel-region-option-").is_empty(),
+        "the list closes after a choice"
+    );
 }
 
 #[test]

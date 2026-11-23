@@ -4,7 +4,8 @@ use leapp_core::regions::{DEFAULT_REGION, REGIONS};
 use leapp_core::{Error, NewIamUser};
 use rune::{El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{
-    Button, ButtonVariant, Dialog, Kit, Placement, Select, SelectAppearance, TextInput,
+    Button, ButtonVariant, Combobox, ComboboxEvent, ComboboxOption, ComboboxState, Dialog, Kit,
+    Placement, TextInput,
 };
 
 use crate::Ui;
@@ -25,7 +26,8 @@ pub struct CreateForm {
     secret_access_key: TextEdit,
     profile: TextEdit,
     region: String,
-    region_open: bool,
+    /// The region list: open or closed, and its search text.
+    region_combo: ComboboxState,
     errors: FieldErrors,
 }
 
@@ -65,7 +67,7 @@ impl Default for CreateForm {
             secret_access_key: TextEdit::default().secure(),
             profile: TextEdit::new(DEFAULT_PROFILE),
             region: DEFAULT_REGION.to_string(),
-            region_open: false,
+            region_combo: ComboboxState::default(),
             errors: FieldErrors::default(),
         }
     }
@@ -139,7 +141,10 @@ pub(crate) fn open(s: &mut Ui) {
 /// Opens the dialog with the region list open too. For the headless scene only.
 pub(crate) fn open_with_region_list(s: &mut Ui) {
     s.create.open();
-    s.create.region_open = true;
+    let current = Some(s.create.region.as_str());
+    s.create
+        .region_combo
+        .step(ComboboxEvent::Toggle { current });
 }
 
 fn cancel(s: &mut Ui) {
@@ -152,21 +157,24 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     if !f.open {
         return;
     }
-    let region = Select::new("sel-region", REGIONS)
-        .current(Some(&f.region))
-        .appearance(SelectAppearance::Field)
-        .width(FIELD_WIDTH)
-        .placement(Placement::BottomStart)
-        .label("Region")
-        .open(f.region_open)
-        .on_toggle(|s: &mut Ui| s.create.region_open = !s.create.region_open)
-        .on_close(|s: &mut Ui| s.create.region_open = false)
-        .on_choose(|s: &mut Ui, region: &str, _tx: &mut Tx| {
-            s.create.region = region.to_string();
-            s.create.region_open = false;
-            s.create.errors.region = None;
-        })
-        .build(k, layer);
+    let regions: Vec<ComboboxOption> = REGIONS
+        .iter()
+        .map(|r| ComboboxOption::new(*r, *r))
+        .collect();
+    let region = Combobox::new("sel-region", &f.region_combo, &regions, |s: &mut Ui| {
+        &mut s.create.region_combo
+    })
+    .current(Some(&f.region))
+    .width(FIELD_WIDTH)
+    .placement(Placement::BottomStart)
+    .label("Region")
+    .search_placeholder("Search regions")
+    .empty_message("No region matches")
+    .on_choose(|s: &mut Ui, region: &str, _tx: &mut Tx| {
+        s.create.region = region.to_string();
+        s.create.errors.region = None;
+    })
+    .build(k, layer);
 
     let body = col()
         .key("dlg-iam-user")

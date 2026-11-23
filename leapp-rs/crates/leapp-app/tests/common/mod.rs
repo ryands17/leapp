@@ -124,6 +124,15 @@ impl AppHarness {
         self.frames(2);
     }
 
+    /// Presses one key, such as `Key::Enter`, on the focused element.
+    pub fn press(&mut self, key: Key) {
+        self.rt.key(KeyEvent {
+            key,
+            mods: Mods::default(),
+        });
+        self.frames(2);
+    }
+
     pub fn type_text(&mut self, text: &str) {
         self.rt.key(KeyEvent {
             key: Key::Text(text.to_string()),
