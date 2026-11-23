@@ -29,6 +29,9 @@ Run all commands in `leapp-rs/`.
 - `AppSpec::init` is a plain `fn`. It builds `Ui` from `leapp_app::install(..)`, which must run
   before `rune::run`.
 - The headless runtime does not call `setup`, so the harness has no waker. `poll` runs every frame.
+- rune-kit `Dialog::new(k, ..)` keys its panel `<k>-dialog`; `Select::new(k, ..)` keys its trigger `<k>-trigger`.
+  The brief's keys (`dlg-iam-user`, `sel-region`) are wrapper elements around them.
+- A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
 
 ## Gotchas

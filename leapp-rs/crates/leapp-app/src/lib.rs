@@ -8,9 +8,11 @@ use std::sync::{Arc, OnceLock};
 
 use leapp_core::{Leapp, NewIamUser, Workspace};
 use rune::{AppSpec, Cx, El, Tx, Waker};
+use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
 
 pub use bridge::{Bridge, Msg, UiPrompter};
+pub use views::create_dialog::CreateForm;
 
 /// A question from core that waits for the user's answer.
 struct PendingConfirm {
@@ -26,6 +28,7 @@ pub struct Ui {
     bridge: Bridge,
     ws: Workspace,
     error: Option<String>,
+    create: CreateForm,
     /// Task 7 shows this as a dialog.
     confirm: Option<PendingConfirm>,
 }
@@ -39,6 +42,7 @@ impl Ui {
             bridge,
             ws,
             error: None,
+            create: CreateForm::default(),
             confirm: None,
         }
     }
@@ -51,6 +55,11 @@ impl Ui {
     /// The error the UI shows now, if any.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// The Create IAM User dialog.
+    pub fn create_form(&self) -> &CreateForm {
+        &self.create
     }
 
     /// The profile of the overwrite question that waits for an answer, if any.
@@ -79,7 +88,10 @@ impl Ui {
 }
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
-    views::main_window::view(s, cx)
+    let k = Kit::neutral(cx.system_dark());
+    let mut layer = Vec::new();
+    views::create_dialog::build(s, &k, &mut layer);
+    root(views::main_window::view(s, &k), layer)
 }
 
 /// Reads all bridge messages. True if the state changed.

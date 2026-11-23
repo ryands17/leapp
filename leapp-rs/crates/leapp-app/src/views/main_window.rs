@@ -2,7 +2,7 @@
 //! (spec 14.1).
 
 use leapp_core::{Session, SessionKind, SessionStatus, Workspace};
-use rune::{Color, Cx, El, Icon, ScrollSpec, col, el, hairline, oklch, row, text};
+use rune::{Color, El, Icon, ScrollSpec, col, el, hairline, oklch, row, text};
 use rune_kit::{IconButton, IconButtonVariant, Kit, Spinner};
 
 use crate::Ui;
@@ -33,28 +33,27 @@ fn grey() -> Color {
     oklch(0.55, 0.0, 0.0)
 }
 
-pub(crate) fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
-    let k = Kit::neutral(cx.system_dark());
+pub(crate) fn view(s: &Ui, k: &Kit) -> El {
     let mut main = col()
         .grow(1.0)
         .h_full()
         .min_w(0.0)
         .fill(k.c.bg_base)
-        .child(toolbar(&k))
+        .child(toolbar(k))
         .child(hairline(k.c.border_muted));
     main = if s.ws.sessions.is_empty() {
-        main.child(empty_state(&k))
+        main.child(empty_state(k))
     } else {
-        main.child(table(&s.ws, &k))
+        main.child(table(&s.ws, k))
     };
     if let Some(message) = &s.error {
-        main = main.child(error_toast(message, &k));
+        main = main.child(error_toast(message, k));
     }
     row()
         .w_full()
         .h_full()
         .fill(k.c.page)
-        .child(sidebar(&k))
+        .child(sidebar(k))
         .child(main)
 }
 
@@ -85,6 +84,7 @@ fn toolbar(k: &Kit) -> El {
     let create = IconButton::new(&PLUS_CIRCLE)
         .variant(IconButtonVariant::Ghost)
         .label("Add session")
+        .on_press(super::create_dialog::open)
         .build(k)
         .key("btn-create");
     row()
