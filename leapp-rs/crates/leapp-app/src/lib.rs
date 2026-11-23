@@ -25,6 +25,10 @@ struct PendingConfirm {
 /// How long the error toast stays, in seconds.
 const TOAST_SECONDS: f64 = 8.0;
 
+/// For how long, in seconds, the overwrite question ignores answers after it comes to the front.
+/// The second click of a double-click on "Overwrite" must not answer the next question.
+pub const CONFIRM_ARM_SECONDS: f64 = 0.5;
+
 /// The state of the UI. The render thread owns it.
 pub struct Ui {
     leapp: Arc<Leapp>,
@@ -37,6 +41,11 @@ pub struct Ui {
     create: CreateForm,
     /// Questions from core, oldest first. The dialog shows the first one.
     confirms: VecDeque<PendingConfirm>,
+    /// The clock of `poll` when the first question came to the front. `None` until the next
+    /// `poll`.
+    confirm_since: Option<f64>,
+    /// True when the first question takes answers: [`CONFIRM_ARM_SECONDS`] after `confirm_since`.
+    confirm_armed: bool,
 }
 
 impl Ui {
@@ -51,6 +60,8 @@ impl Ui {
             error_since: None,
             create: CreateForm::default(),
             confirms: VecDeque::new(),
+            confirm_since: None,
+            confirm_armed: false,
         }
     }
 
@@ -79,9 +90,16 @@ impl Ui {
         self.confirms.len()
     }
 
-    /// Answers the first waiting question. Later questions stay in line.
+    /// Answers the first waiting question. Later questions stay in line. An answer in the first
+    /// [`CONFIRM_ARM_SECONDS`] after the question came to the front is ignored.
     pub(crate) fn answer_confirm(&mut self, yes: bool) {
+        if !self.confirm_armed {
+            return;
+        }
         if let Some(c) = self.confirms.pop_front() {
+            // The next question starts its own delay at the next `poll`.
+            self.confirm_since = None;
+            self.confirm_armed = false;
             // The task of core can end before the answer: then nobody waits for it.
             let _ = c.reply.send(yes);
         }
@@ -162,6 +180,16 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             Msg::ConfirmOverwrite { profile, reply } => {
                 s.confirms.push_back(PendingConfirm { profile, reply });
             }
+        }
+    }
+    if !s.confirms.is_empty() && !s.confirm_armed {
+        let since = *s.confirm_since.get_or_insert(t);
+        let left = CONFIRM_ARM_SECONDS - (t - since);
+        if left <= 0.0 {
+            s.confirm_armed = true;
+        } else {
+            // A `poll` must run when the delay ends, even if nothing else wakes the UI.
+            tx.wake_after(Duration::from_secs_f64(left));
         }
     }
     if s.error.is_some() {

@@ -234,6 +234,7 @@ fn overwrite_prompt_yes_replaces_and_stop_restores() {
     h.settle_with(|h| h.has("dlg-overwrite"));
     assert!(h.text_of("dlg-overwrite").unwrap().contains("default"));
 
+    h.wait_for_arming();
     h.tap("btn-overwrite-yes");
     h.settle(|ui| status(ui, id) == SessionStatus::Active);
     assert!(!h.has("dlg-overwrite"));
@@ -251,6 +252,7 @@ fn overwrite_prompt_no_shows_an_error_and_keeps_the_file() {
     let key = format!("status-{id}");
     h.tap(&key);
     h.settle_with(|h| h.has("dlg-overwrite"));
+    h.wait_for_arming();
     h.tap("btn-overwrite-no");
     h.settle_with(|h| h.has("toast-error"));
 
@@ -298,18 +300,19 @@ fn the_error_toast_hides_after_eight_seconds_and_on_close() {
     assert!(!h.has("toast-error"));
 }
 
-#[test]
-fn a_second_overwrite_question_waits_for_the_first() {
+const TWO_USER_SECTIONS: &str =
+    "[first]\naws_access_key_id = AKIAONE\n\n[second]\naws_access_key_id = AKIATWO\n";
+
+/// Two IAM Users on two user-owned profiles, `first` and `second`, and two overwrite questions in
+/// line: the one for `first` is in front.
+fn two_questions() -> (AppHarness, (leapp_core::SessionId, leapp_core::SessionId)) {
     let (mut h, ids) = AppHarness::with_setup(|l| {
         (
             l.create_iam_user(iam_user("one", "first")).unwrap(),
             l.create_iam_user(iam_user("two", "second")).unwrap(),
         )
     });
-    write_credentials(
-        &h,
-        "[first]\naws_access_key_id = AKIAONE\n\n[second]\naws_access_key_id = AKIATWO\n",
-    );
+    write_credentials(&h, TWO_USER_SECTIONS);
     h.tap(&format!("status-{}", ids.0));
     h.settle_with(|h| h.has("dlg-overwrite"));
     assert!(h.text_of("dlg-overwrite").unwrap().contains("first"));
@@ -319,19 +322,77 @@ fn a_second_overwrite_question_waits_for_the_first() {
     let second = ids.1;
     h.rt.state.run(async move { leapp.start(second).await });
     h.settle(|ui| ui.pending_confirm_count() == 2);
+    (h, ids)
+}
+
+#[test]
+fn a_second_overwrite_question_waits_for_the_first() {
+    let (mut h, ids) = two_questions();
     assert!(
         h.text_of("dlg-overwrite").unwrap().contains("first"),
         "the first question stays in front"
     );
 
+    h.wait_for_arming();
     h.tap("btn-overwrite-yes");
     h.settle(|ui| status(ui, ids.0) == SessionStatus::Active);
     h.settle_with(|h| {
         h.text_of("dlg-overwrite")
             .is_some_and(|t| t.contains("second"))
     });
+    h.wait_for_arming();
     h.tap("btn-overwrite-yes");
     h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
     assert!(!h.has("dlg-overwrite"));
     assert!(credentials(&h).contains("ASIAFAKE"));
+}
+
+#[test]
+fn a_double_click_does_not_answer_the_next_question() {
+    let (mut h, ids) = two_questions();
+    h.wait_for_arming();
+
+    // A double-click: the first click answers "first", the second lands on the next dialog.
+    h.tap("btn-overwrite-yes");
+    h.tap("btn-overwrite-yes");
+
+    assert_eq!(h.rt.state.pending_confirm_count(), 1);
+    assert_eq!(h.rt.state.pending_confirm(), Some("second"));
+    assert!(h.text_of("dlg-overwrite").unwrap().contains("second"));
+    h.settle(|ui| status(ui, ids.0) == SessionStatus::Active);
+    assert_eq!(status(&h.rt.state, ids.1), SessionStatus::Pending);
+    assert!(
+        credentials(&h).contains("AKIATWO"),
+        "second is not replaced"
+    );
+
+    // After the delay, a click answers the second question.
+    h.wait_for_arming();
+    h.tap("btn-overwrite-yes");
+    h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
+    assert_eq!(h.rt.state.pending_confirm_count(), 0);
+    assert!(!credentials(&h).contains("AKIATWO"));
+}
+
+#[test]
+fn each_question_in_line_gets_its_own_answer() {
+    let (mut h, ids) = two_questions();
+
+    h.wait_for_arming();
+    h.tap("btn-overwrite-no");
+    h.settle_with(|h| h.has("toast-error"));
+    assert_eq!(status(&h.rt.state, ids.0), SessionStatus::Inactive);
+    assert_eq!(h.rt.state.pending_confirm(), Some("second"));
+
+    h.wait_for_arming();
+    h.tap("btn-overwrite-yes");
+    h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
+
+    let text = credentials(&h);
+    assert!(
+        text.starts_with("[first]\naws_access_key_id = AKIAONE\n\n[second]\n"),
+        "{text}"
+    );
+    assert!(!text.contains("AKIATWO") && text.contains("ASIAFAKE0001"));
+    assert_eq!(status(&h.rt.state, ids.0), SessionStatus::Inactive);
 }

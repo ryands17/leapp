@@ -75,6 +75,13 @@ impl AppHarness {
         }
     }
 
+    /// Runs frames for the arming delay of the overwrite question (harness time), so that the
+    /// question in front takes an answer.
+    pub fn wait_for_arming(&mut self) {
+        let n = (leapp_app::CONFIRM_ARM_SECONDS * 60.0).ceil() as usize + 2;
+        self.frames(n);
+    }
+
     /// Runs frames until `until` is true. Panics after 5 s of real time.
     pub fn settle(&mut self, until: impl Fn(&Ui) -> bool) {
         self.settle_with(|h| until(&h.rt.state));
