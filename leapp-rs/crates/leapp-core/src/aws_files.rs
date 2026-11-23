@@ -37,8 +37,7 @@ impl CredentialsFile {
         }
     }
 
-    /// Count of `[profile]` headers. Task 4 uses it to refuse a duplicate section.
-    #[allow(dead_code)]
+    /// Count of `[profile]` headers. More than one means the file is ambiguous.
     pub fn sections_named(&self, profile: &str) -> Result<usize> {
         let text = self.read()?;
         Ok(lines(&text)
