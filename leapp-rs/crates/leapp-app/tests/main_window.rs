@@ -140,8 +140,9 @@ fn the_narrowest_window_keeps_the_table_headers_apart() {
         session[0] + session[2] <= role[0],
         "Session {session:?} runs into Role {role:?}"
     );
+    // 160 is `SESSION_MIN_WIDTH` in `views/main_window.rs`.
     assert!(
-        session[2] >= 120.0,
+        session[2] >= 160.0,
         "Session column too narrow: {session:?}"
     );
     let status = h.rect(&format!("status-{id}"));
