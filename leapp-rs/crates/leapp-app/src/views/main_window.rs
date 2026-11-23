@@ -15,6 +15,19 @@ const PROVIDER_WIDTH: f32 = 150.0;
 const PROFILE_WIDTH: f32 = 160.0;
 const REGION_WIDTH: f32 = 120.0;
 const STATUS_WIDTH: f32 = 40.0;
+/// The Session column grows with the window but never gets narrower than this.
+const SESSION_MIN_WIDTH: f32 = 160.0;
+const TABLE_PADDING_X: f32 = 16.0;
+
+/// The narrowest window that shows every table column at its width.
+pub(crate) const MIN_WINDOW_WIDTH: f32 = SIDEBAR_WIDTH
+    + 2.0 * TABLE_PADDING_X
+    + SESSION_MIN_WIDTH
+    + ROLE_WIDTH
+    + PROVIDER_WIDTH
+    + PROFILE_WIDTH
+    + REGION_WIDTH
+    + STATUS_WIDTH;
 
 /// The (+) of the toolbar: a circle with a plus in it.
 static PLUS_CIRCLE: Icon = Icon {
@@ -117,13 +130,17 @@ fn table(ws: &Workspace, k: &Kit) -> El {
     let header = row()
         .w_full()
         .h(44.0)
-        .px(16.0)
+        .px(TABLE_PADDING_X)
         .center_y()
-        .child(header_cell("Session", k).grow(1.0).min_w(0.0))
-        .child(header_cell("Role", k).w(ROLE_WIDTH))
-        .child(header_cell("Provider", k).w(PROVIDER_WIDTH))
-        .child(header_cell("Named Profile", k).w(PROFILE_WIDTH))
-        .child(header_cell("Region", k).w(REGION_WIDTH))
+        .child(
+            header_cell("hdr-session", "Session", k)
+                .grow(1.0)
+                .min_w(SESSION_MIN_WIDTH),
+        )
+        .child(header_cell("hdr-role", "Role", k).w(ROLE_WIDTH))
+        .child(header_cell("hdr-provider", "Provider", k).w(PROVIDER_WIDTH))
+        .child(header_cell("hdr-profile", "Named Profile", k).w(PROFILE_WIDTH))
+        .child(header_cell("hdr-region", "Region", k).w(REGION_WIDTH))
         .child(el().w(STATUS_WIDTH));
     let mut rows = col().w_full();
     for session in sorted(ws) {
@@ -146,8 +163,12 @@ fn table(ws: &Workspace, k: &Kit) -> El {
         )
 }
 
-fn header_cell(title: &str, k: &Kit) -> El {
-    text(title.to_string()).font(k.ty.ui).color(k.c.text_muted)
+fn header_cell(key: &str, title: &str, k: &Kit) -> El {
+    text(title.to_string())
+        .key(key)
+        .font(k.ty.ui)
+        .color(k.c.text_muted)
+        .truncate()
 }
 
 fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
@@ -178,10 +199,10 @@ fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
         .on_double_press(move |s: &mut Ui| s.toggle(id))
         .w_full()
         .h(ROW_HEIGHT)
-        .px(16.0)
+        .px(TABLE_PADDING_X)
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
-        .child(row().grow(1.0).min_w(0.0).child(name))
+        .child(row().grow(1.0).min_w(SESSION_MIN_WIDTH).child(name))
         .child(el().w(ROLE_WIDTH))
         .child(row().w(PROVIDER_WIDTH).child(provider))
         .child(

@@ -120,3 +120,33 @@ fn the_one_session_scene_shows_one_inactive_row() {
         Some("IAM User")
     );
 }
+
+#[test]
+fn the_narrowest_window_keeps_the_table_headers_apart() {
+    let (mut h, id) = AppHarness::with_setup(|leapp| {
+        leapp
+            .create_iam_user(common::iam_user("A session with a long name", "default"))
+            .unwrap()
+    });
+    let (min_w, min_h) = leapp_app::spec()
+        .min_size
+        .expect("the window has a minimum size");
+    h.rt.set_viewport((min_w, min_h), 1.0);
+    h.frames(2);
+
+    let session = h.rect("hdr-session");
+    let role = h.rect("hdr-role");
+    assert!(
+        session[0] + session[2] <= role[0],
+        "Session {session:?} runs into Role {role:?}"
+    );
+    assert!(
+        session[2] >= 120.0,
+        "Session column too narrow: {session:?}"
+    );
+    let status = h.rect(&format!("status-{id}"));
+    assert!(
+        status[0] + status[2] <= min_w,
+        "the status dot {status:?} is outside the {min_w} px window"
+    );
+}

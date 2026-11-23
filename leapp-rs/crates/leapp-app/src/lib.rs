@@ -270,11 +270,15 @@ pub fn on_close(s: &mut Ui, tx: &mut Tx) {
     tx.quit();
 }
 
+/// The window can not get shorter than this: the toolbar, the header and a few rows.
+const MIN_WINDOW_HEIGHT: f32 = 480.0;
+
 pub fn spec() -> AppSpec<Ui> {
     AppSpec {
         setup: Some(setup),
         poll: Some(poll),
         scenes: SCENES,
+        min_size: Some((views::main_window::MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)),
         ..AppSpec::new("Leapp RS", (1100.0, 700.0), init, view)
     }
 }
