@@ -3,10 +3,12 @@
 mod bridge;
 mod views;
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use leapp_core::{Leapp, NewIamUser, Workspace};
+use leapp_core::{Leapp, NewIamUser, SessionId, SessionStatus, Workspace};
 use rune::{AppSpec, Cx, El, Tx, Waker};
 use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
@@ -17,9 +19,11 @@ pub use views::create_dialog::CreateForm;
 /// A question from core that waits for the user's answer.
 struct PendingConfirm {
     profile: String,
-    #[expect(dead_code, reason = "Task 7 sends the answer")]
     reply: oneshot::Sender<bool>,
 }
+
+/// How long the error toast stays, in seconds.
+const TOAST_SECONDS: f64 = 8.0;
 
 /// The state of the UI. The render thread owns it.
 pub struct Ui {
@@ -28,9 +32,11 @@ pub struct Ui {
     bridge: Bridge,
     ws: Workspace,
     error: Option<String>,
+    /// The clock of `poll` when the toast first showed. `None` until the next `poll`.
+    error_since: Option<f64>,
     create: CreateForm,
-    /// Task 7 shows this as a dialog.
-    confirm: Option<PendingConfirm>,
+    /// Questions from core, oldest first. The dialog shows the first one.
+    confirms: VecDeque<PendingConfirm>,
 }
 
 impl Ui {
@@ -42,8 +48,9 @@ impl Ui {
             bridge,
             ws,
             error: None,
+            error_since: None,
             create: CreateForm::default(),
-            confirm: None,
+            confirms: VecDeque::new(),
         }
     }
 
@@ -62,9 +69,55 @@ impl Ui {
         &self.create
     }
 
-    /// The profile of the overwrite question that waits for an answer, if any.
+    /// The profile of the overwrite question that the dialog shows now, if any.
     pub fn pending_confirm(&self) -> Option<&str> {
-        self.confirm.as_ref().map(|c| c.profile.as_str())
+        self.confirms.front().map(|c| c.profile.as_str())
+    }
+
+    /// How many overwrite questions wait for an answer, the open one included.
+    pub fn pending_confirm_count(&self) -> usize {
+        self.confirms.len()
+    }
+
+    /// Answers the first waiting question. Later questions stay in line.
+    pub(crate) fn answer_confirm(&mut self, yes: bool) {
+        if let Some(c) = self.confirms.pop_front() {
+            // The task of core can end before the answer: then nobody waits for it.
+            let _ = c.reply.send(yes);
+        }
+    }
+
+    /// Shows `message` in the error toast. The toast hides after [`TOAST_SECONDS`].
+    pub(crate) fn show_error(&mut self, message: String) {
+        self.error = Some(message);
+        self.error_since = None;
+    }
+
+    pub(crate) fn clear_error(&mut self) {
+        self.error = None;
+        self.error_since = None;
+    }
+
+    /// Starts an inactive session or stops an active one. A pending session stays as it is.
+    /// A start shows `Pending` at once; core confirms it, or sets `Inactive` if the start fails.
+    pub(crate) fn toggle(&mut self, id: SessionId) {
+        let Some(status) = self.ws.session(id).map(|s| s.status) else {
+            return;
+        };
+        match status {
+            SessionStatus::Pending => {}
+            SessionStatus::Inactive => {
+                if let Some(s) = self.ws.sessions.iter_mut().find(|s| s.id == id) {
+                    s.status = SessionStatus::Pending;
+                }
+                let leapp = self.leapp.clone();
+                self.run(async move { leapp.start(id).await });
+            }
+            SessionStatus::Active => {
+                let leapp = self.leapp.clone();
+                self.run(async move { leapp.stop(id).await });
+            }
+        }
     }
 
     /// Runs `f` on the tokio runtime, off the render thread. When it ends, the UI reads the
@@ -91,23 +144,34 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
     views::create_dialog::build(s, &k, &mut layer);
+    views::overwrite_dialog::build(s, &k, &mut layer);
     root(views::main_window::view(s, &k), layer)
 }
 
 /// Reads all bridge messages. True if the state changed.
-pub fn poll(s: &mut Ui, _t: f64, _tx: &mut Tx) -> bool {
+pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     for m in s.bridge.drain() {
         changed = true;
         match m {
             Msg::Refreshed => s.refresh(),
             Msg::Failed(message) => {
-                s.error = Some(message);
+                s.show_error(message);
                 s.refresh();
             }
             Msg::ConfirmOverwrite { profile, reply } => {
-                s.confirm = Some(PendingConfirm { profile, reply });
+                s.confirms.push_back(PendingConfirm { profile, reply });
             }
+        }
+    }
+    if s.error.is_some() {
+        let since = *s.error_since.get_or_insert(t);
+        let left = TOAST_SECONDS - (t - since);
+        if left <= 0.0 {
+            s.clear_error();
+            changed = true;
+        } else {
+            tx.wake_after(Duration::from_secs_f64(left));
         }
     }
     changed
@@ -155,7 +219,7 @@ fn one_session(s: &mut Ui) {
         region: "us-east-1".into(),
     });
     if let Err(e) = created {
-        s.error = Some(e.to_string());
+        s.show_error(e.to_string());
     }
     s.refresh();
 }

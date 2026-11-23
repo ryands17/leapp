@@ -77,15 +77,31 @@ impl AppHarness {
 
     /// Runs frames until `until` is true. Panics after 5 s of real time.
     pub fn settle(&mut self, until: impl Fn(&Ui) -> bool) {
+        self.settle_with(|h| until(&h.rt.state));
+    }
+
+    /// Like `settle`, but `until` sees the whole harness (the element tree too).
+    pub fn settle_with(&mut self, until: impl Fn(&AppHarness) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             self.frames(1);
-            if until(&self.rt.state) {
+            if until(self) {
                 // One more frame, so the view shows the new state.
                 self.frames(1);
                 return;
             }
-            assert!(Instant::now() < deadline, "the UI did not settle in 5 s");
+            assert!(
+                Instant::now() < deadline,
+                "the UI did not settle in 5 s; sessions: {:?}, questions: {}",
+                self.rt
+                    .state
+                    .workspace()
+                    .sessions
+                    .iter()
+                    .map(|s| s.status)
+                    .collect::<Vec<_>>(),
+                self.rt.state.pending_confirm_count()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }

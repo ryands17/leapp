@@ -175,6 +175,7 @@ fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
     row()
         .key(format!("row-{id}"))
         .role("row")
+        .on_double_press(move |s: &mut Ui| s.toggle(id))
         .w_full()
         .h(ROW_HEIGHT)
         .px(16.0)
@@ -234,6 +235,7 @@ fn status(id: leapp_core::SessionId, status: SessionStatus, k: &Kit) -> El {
         .key(format!("status-{id}"))
         .role("status")
         .label(label)
+        .on_press(move |s: &mut Ui| s.toggle(id))
         .size(12.0, 12.0)
         .center()
         .child(inner)
@@ -266,6 +268,6 @@ fn error_toast(message: &str, k: &Kit) -> El {
                 .role("button")
                 .font(k.ty.ui_medium)
                 .color(k.c.danger.fg)
-                .on_press(|s: &mut Ui| s.error = None),
+                .on_press(|s: &mut Ui| s.clear_error()),
         )
 }

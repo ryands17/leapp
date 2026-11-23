@@ -158,3 +158,180 @@ fn success_wipes_the_fields() {
     assert!(h.rt.state.create_form().is_blank());
     assert!(!h.has("err-name"));
 }
+
+// ---- start and stop ----
+
+use common::iam_user;
+use leapp_core::SessionStatus;
+
+const USER_SECTION: &str = "[default]\naws_access_key_id = AKIAUSER\n";
+
+fn credentials(h: &AppHarness) -> String {
+    std::fs::read_to_string(h.home.path().join(".aws/credentials")).unwrap_or_default()
+}
+
+fn write_credentials(h: &AppHarness, text: &str) {
+    let dir = h.home.path().join(".aws");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("credentials"), text).unwrap();
+}
+
+fn status(ui: &leapp_app::Ui, id: leapp_core::SessionId) -> SessionStatus {
+    ui.workspace().session(id).unwrap().status
+}
+
+/// A harness with one IAM User on profile `default`.
+fn with_session() -> (AppHarness, leapp_core::SessionId) {
+    let (h, id) =
+        AppHarness::with_setup(|l| l.create_iam_user(iam_user("dev", "default")).unwrap());
+    (h, id)
+}
+
+#[test]
+fn start_and_stop_from_the_table() {
+    let (mut h, id) = with_session();
+    let key = format!("status-{id}");
+    assert_eq!(h.text_of(&key).as_deref(), Some("inactive"));
+
+    h.fake
+        .delay_next("GetSessionToken", std::time::Duration::from_millis(300));
+    h.tap(&key);
+    assert_eq!(
+        h.text_of(&key).as_deref(),
+        Some("pending"),
+        "the UI shows pending at once"
+    );
+    h.settle(|ui| status(ui, id) == SessionStatus::Active);
+    assert_eq!(h.text_of(&key).as_deref(), Some("active"));
+    assert!(credentials(&h).contains("[default]"));
+    assert!(credentials(&h).contains("ASIAFAKE0001"));
+
+    h.tap(&key);
+    h.settle(|ui| status(ui, id) == SessionStatus::Inactive);
+    assert!(!credentials(&h).contains("[default]"));
+}
+
+#[test]
+fn double_click_on_the_row_starts_the_session() {
+    let (mut h, id) = with_session();
+    let row = format!("row-{id}");
+    let (x, y) = h.rt.find(&row).unwrap();
+    for _ in 0..2 {
+        h.rt.pointer_down(x - 100.0, y);
+        h.rt.pointer_up(x - 100.0, y);
+        h.frames(1);
+    }
+    h.settle(|ui| status(ui, id) == SessionStatus::Active);
+    assert!(credentials(&h).contains("ASIAFAKE0001"));
+}
+
+#[test]
+fn overwrite_prompt_yes_replaces_and_stop_restores() {
+    let (mut h, id) = with_session();
+    write_credentials(&h, USER_SECTION);
+    let key = format!("status-{id}");
+    h.tap(&key);
+    h.settle_with(|h| h.has("dlg-overwrite"));
+    assert!(h.text_of("dlg-overwrite").unwrap().contains("default"));
+
+    h.tap("btn-overwrite-yes");
+    h.settle(|ui| status(ui, id) == SessionStatus::Active);
+    assert!(!h.has("dlg-overwrite"));
+    assert!(credentials(&h).contains("ASIAFAKE0001"));
+
+    h.tap(&key);
+    h.settle(|ui| status(ui, id) == SessionStatus::Inactive);
+    assert_eq!(credentials(&h), USER_SECTION);
+}
+
+#[test]
+fn overwrite_prompt_no_shows_an_error_and_keeps_the_file() {
+    let (mut h, id) = with_session();
+    write_credentials(&h, USER_SECTION);
+    let key = format!("status-{id}");
+    h.tap(&key);
+    h.settle_with(|h| h.has("dlg-overwrite"));
+    h.tap("btn-overwrite-no");
+    h.settle_with(|h| h.has("toast-error"));
+
+    assert!(!h.has("dlg-overwrite"));
+    assert_eq!(h.text_of(&key).as_deref(), Some("inactive"));
+    assert_eq!(credentials(&h), USER_SECTION);
+}
+
+#[test]
+fn aws_error_is_shown_to_the_user() {
+    let (mut h, id) = with_session();
+    h.fake.fail_next(
+        "GetSessionToken",
+        403,
+        "InvalidClientTokenId",
+        "The security token included in the request is invalid.",
+    );
+    let key = format!("status-{id}");
+    h.tap(&key);
+    h.settle_with(|h| h.has("toast-error"));
+
+    assert!(h.text_of("toast-error").unwrap().contains("security token"));
+    assert_eq!(h.text_of(&key).as_deref(), Some("inactive"));
+}
+
+#[test]
+fn the_error_toast_hides_after_eight_seconds_and_on_close() {
+    let (mut h, id) = with_session();
+    h.fake
+        .fail_next("GetSessionToken", 403, "InvalidClientTokenId", "bad key");
+    h.tap(&format!("status-{id}"));
+    h.settle_with(|h| h.has("toast-error"));
+
+    h.rt.frame(7.0);
+    assert!(h.has("toast-error"), "still shown after 7 s");
+    h.rt.frame(2.0);
+    h.frames(1);
+    assert!(!h.has("toast-error"), "hidden after 8 s");
+
+    h.fake
+        .fail_next("GetSessionToken", 403, "InvalidClientTokenId", "bad key");
+    h.tap(&format!("status-{id}"));
+    h.settle_with(|h| h.has("toast-error"));
+    h.tap("toast-error-close");
+    assert!(!h.has("toast-error"));
+}
+
+#[test]
+fn a_second_overwrite_question_waits_for_the_first() {
+    let (mut h, ids) = AppHarness::with_setup(|l| {
+        (
+            l.create_iam_user(iam_user("one", "first")).unwrap(),
+            l.create_iam_user(iam_user("two", "second")).unwrap(),
+        )
+    });
+    write_credentials(
+        &h,
+        "[first]\naws_access_key_id = AKIAONE\n\n[second]\naws_access_key_id = AKIATWO\n",
+    );
+    h.tap(&format!("status-{}", ids.0));
+    h.settle_with(|h| h.has("dlg-overwrite"));
+    assert!(h.text_of("dlg-overwrite").unwrap().contains("first"));
+
+    // The second start runs while the first dialog is open.
+    let leapp = h.leapp.clone();
+    let second = ids.1;
+    h.rt.state.run(async move { leapp.start(second).await });
+    h.settle(|ui| ui.pending_confirm_count() == 2);
+    assert!(
+        h.text_of("dlg-overwrite").unwrap().contains("first"),
+        "the first question stays in front"
+    );
+
+    h.tap("btn-overwrite-yes");
+    h.settle(|ui| status(ui, ids.0) == SessionStatus::Active);
+    h.settle_with(|h| {
+        h.text_of("dlg-overwrite")
+            .is_some_and(|t| t.contains("second"))
+    });
+    h.tap("btn-overwrite-yes");
+    h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
+    assert!(!h.has("dlg-overwrite"));
+    assert!(credentials(&h).contains("ASIAFAKE"));
+}
