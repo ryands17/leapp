@@ -21,6 +21,10 @@ Run all commands in `leapp-rs/`.
 - Tests never touch the real home folder, the real keychain, or real AWS.
   Use a `tempfile::TempDir` as home, `MemoryStore`, and `fake-aws`.
 - Keep secrets in the `SecretStore` only. Never put them in `workspace.json` or logs.
+- Secrets are secret access keys, session tokens, MFA codes and the user's backed-up section. They
+  never go in `workspace.json`, logs, `Debug` output, error text or the element tree. The access key
+  ID is an identifier (owner ruling): it may show in the UI and the element tree, but it is kept
+  only in the `SecretStore` and never goes in `workspace.json`, logs, `Debug` output or error text.
 - `leapp-core` must not depend on Rune.
 
 ## Rune

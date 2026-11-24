@@ -42,7 +42,7 @@ All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
 - Done (`9f5fbe2f`, test `the_dialog_fits_the_smallest_window`): the Create dialog at 1032x480.
 - Done (Task 9, test file `crates/leapp-app/tests/refresh.rs`): the app refresh loop
   (`spawn_refresh_loop`, `REFRESH_TICK`).
-- Done (final-review fix wave, tests `a_start_that_panics_leaves_the_session_inactive` and
+- Done (`cb20492a`, tests `a_start_that_panics_leaves_the_session_inactive` and
   `the_loop_runs_again_after_a_tick_panics`): a panic in a start or a refresh no longer leaves the
   session `Pending` (`PendingGuard`).
 - Moved to "Small items": the region search test assumes that "eu-w" matches only `eu-west-*`.
@@ -94,6 +94,11 @@ All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
 - The region option list is rebuilt on each frame while the dialog is open (about 30 items).
 - A stop that a refresh refuses (the refresh holds the session `Pending`) says "Another session
   with the same named profile is starting". It should say that the session is being refreshed.
+- A delete that an edit's reservation refuses also says "Another session with the same named
+  profile is starting" (`editing_error()`). It should say that the session is being edited.
+- A panic during a refresh sets the session `Inactive` in memory only (`PendingGuard` does no I/O).
+  The managed entry and our section in `~/.aws/credentials` stay until `shutdown`, `startup` or a
+  new start and stop of that session.
 
 ## Decisions made without the owner (rulings)
 
