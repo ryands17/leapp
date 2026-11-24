@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::secrets::SecretStore;
 
@@ -13,14 +13,14 @@ pub struct Endpoints {
 }
 
 pub trait Clock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> Timestamp;
 }
 
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> Timestamp {
+        Timestamp::now()
     }
 }
 

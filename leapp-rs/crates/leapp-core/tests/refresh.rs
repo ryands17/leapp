@@ -4,8 +4,8 @@ mod common;
 
 use std::sync::Arc;
 
-use chrono::Duration;
 use common::{FlakyStore, Harness};
+use jiff::SignedDuration;
 use leapp_core::{
     IamUserUpdate, REFRESH_TICK, SESSION_DURATION, SessionId, SessionKind, SessionStatus,
 };
@@ -13,8 +13,8 @@ use leapp_core::{
 const DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
 const MINE: &str = "[default]\naws_access_key_id = MYKEY\naws_secret_access_key = MYSECRET\n";
 
-fn secs(n: i64) -> Duration {
-    Duration::seconds(n)
+fn secs(n: i64) -> SignedDuration {
+    SignedDuration::from_secs(n)
 }
 
 async fn started(h: &Harness) -> SessionId {
@@ -74,7 +74,7 @@ async fn an_old_session_is_written_again_with_the_cached_token() {
     assert_eq!(h.fake.count("GetSessionToken"), 1);
     assert!(h.credentials_text().unwrap().contains("fake-token-1"));
     // The new start time is saved on disk too.
-    assert!(h.workspace_text().contains(&now.to_rfc3339()[..19]));
+    assert!(h.workspace_text().contains(&now.to_string()[..19]));
 }
 
 #[tokio::test]

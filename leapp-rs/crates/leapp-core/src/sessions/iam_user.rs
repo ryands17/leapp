@@ -5,7 +5,7 @@ use std::time::Duration;
 use aws_sdk_sts::config::timeout::TimeoutConfig;
 use aws_sdk_sts::config::{BehaviorVersion, Credentials, Region, retry::RetryConfig};
 use aws_sdk_sts::error::{DisplayErrorContext, ProvideErrorMetadata};
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::Leapp;
@@ -19,12 +19,12 @@ const STS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A cached token is reused only while it has more than this left (F1-R1). It equals the refresh
 /// age, so the credentials in the file stay valid until the next refresh.
-pub const TOKEN_REUSE_MARGIN: chrono::Duration = chrono::Duration::seconds(1200);
+pub const TOKEN_REUSE_MARGIN: SignedDuration = SignedDuration::from_secs(1200);
 
 /// Temporary credentials for a session.
 pub(crate) struct Issued {
     pub body: SectionBody,
-    pub expiration: DateTime<Utc>,
+    pub expiration: Timestamp,
     /// `true` if this call got a new token from `GetSessionToken`.
     pub fresh: bool,
 }
@@ -49,7 +49,7 @@ impl Leapp {
         };
 
         if let Some(expiration) = session.session_token_expiration
-            && expiration - self.config.clock.now() > TOKEN_REUSE_MARGIN
+            && expiration.duration_since(self.config.clock.now()) > TOKEN_REUSE_MARGIN
             && let Some(json) = secrets.get(&token_key)?
             && let Ok(token) = serde_json::from_str::<CachedToken>(&json)
         {
@@ -103,8 +103,8 @@ impl Leapp {
             .credentials()
             .ok_or_else(|| Error::Aws("AWS returned no credentials".into()))?;
         let expiration = credentials.expiration();
-        let expiration = DateTime::from_timestamp(expiration.secs(), expiration.subsec_nanos())
-            .ok_or_else(|| Error::Aws("AWS returned an invalid expiration time".into()))?;
+        let expiration = Timestamp::new(expiration.secs(), expiration.subsec_nanos() as i32)
+            .map_err(|_| Error::Aws("AWS returned an invalid expiration time".into()))?;
         let token = CachedToken {
             access_key_id: credentials.access_key_id().trim().to_string(),
             secret_access_key: credentials.secret_access_key().trim().to_string(),

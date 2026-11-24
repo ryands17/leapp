@@ -7,8 +7,8 @@ use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use fake_aws::FakeAws;
+use jiff::Timestamp;
 use leapp_app::{Bridge, Ui, UiPrompter};
 use leapp_core::SessionId;
 use leapp_core::{Clock, Config, Error, Leapp, MemoryStore, NewIamUser, SecretStore};
@@ -357,22 +357,23 @@ pub fn mfa_iam_user(name: &str, profile: &str) -> NewIamUser {
 pub const MFA_DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
 
 /// A clock that starts at the real time and moves only when a test advances it.
-pub struct ManualClock(Mutex<DateTime<Utc>>);
+pub struct ManualClock(Mutex<Timestamp>);
 
 impl Default for ManualClock {
     fn default() -> Self {
-        ManualClock(Mutex::new(Utc::now()))
+        ManualClock(Mutex::new(Timestamp::now()))
     }
 }
 
 impl ManualClock {
-    pub fn advance(&self, by: chrono::Duration) {
-        *self.0.lock().unwrap() += by;
+    pub fn advance(&self, by: jiff::SignedDuration) {
+        let mut now = self.0.lock().unwrap();
+        *now = now.checked_add(by).unwrap();
     }
 }
 
 impl Clock for ManualClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> Timestamp {
         *self.0.lock().unwrap()
     }
 }

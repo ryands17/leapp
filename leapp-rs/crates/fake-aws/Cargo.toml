@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 axum.workspace = true
 tokio.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 
 [dev-dependencies]
 aws-config.workspace = true

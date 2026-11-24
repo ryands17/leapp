@@ -1,13 +1,13 @@
 mod common;
 
-use chrono::Duration;
 use common::Harness;
+use jiff::SignedDuration;
 use leapp_core::{SessionKind, SessionStatus, TOKEN_REUSE_MARGIN};
 
 const TOKEN_LIFE: i64 = 36000;
 
-fn secs(n: i64) -> Duration {
-    Duration::seconds(n)
+fn secs(n: i64) -> SignedDuration {
+    SignedDuration::from_secs(n)
 }
 
 /// Create a session, start it, stop it. Returns its id.
@@ -131,21 +131,21 @@ async fn restart_with_time_left(left: i64) -> Harness {
         .unwrap()
         .session_token_expiration
         .unwrap();
-    clock.set(expiration - secs(left));
+    clock.set(expiration.checked_sub(secs(left)).unwrap());
     h.leapp.start(id).await.unwrap();
     h
 }
 
 #[tokio::test]
 async fn a_token_with_exactly_the_margin_left_is_replaced() {
-    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.num_seconds()).await;
+    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.as_secs()).await;
 
     assert_eq!(h.fake.count("GetSessionToken"), 2);
 }
 
 #[tokio::test]
 async fn a_token_with_one_second_more_than_the_margin_is_reused() {
-    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.num_seconds() + 1).await;
+    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.as_secs() + 1).await;
 
     assert_eq!(h.fake.count("GetSessionToken"), 1);
 }

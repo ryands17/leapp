@@ -190,8 +190,10 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
         .get("DurationSeconds")
         .and_then(|s| s.parse().ok())
         .unwrap_or(43200);
-    let expiration = (chrono::Utc::now() + chrono::Duration::seconds(seconds))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expiration = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(seconds))
+        .expect("expiration is in range")
+        .strftime("%Y-%m-%dT%H:%M:%SZ");
     let xml = format!(
         r#"<GetSessionTokenResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <GetSessionTokenResult><Credentials>

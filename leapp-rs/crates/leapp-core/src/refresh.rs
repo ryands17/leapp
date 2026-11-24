@@ -1,6 +1,6 @@
 //! Refresh of old active sessions (spec 10.4, F1-R2, F1-R7).
 
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 use crate::Leapp;
 use crate::error::Error;
@@ -10,7 +10,7 @@ use crate::model::{Session, SessionId, SessionStatus};
 pub const REFRESH_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// An `Active` session is refreshed when `now - start_time` is greater than this.
-pub const SESSION_DURATION: chrono::Duration = chrono::Duration::seconds(1200);
+pub const SESSION_DURATION: SignedDuration = SignedDuration::from_secs(1200);
 
 /// The result of one `refresh_tick`.
 #[derive(Debug, Default)]
@@ -47,11 +47,11 @@ pub(crate) enum Refresh {
 }
 
 /// `Active`, and started more than `SESSION_DURATION` before `now`.
-pub(crate) fn is_due(session: &Session, now: DateTime<Utc>) -> bool {
+pub(crate) fn is_due(session: &Session, now: Timestamp) -> bool {
     session.status == SessionStatus::Active
         && session
             .start_time
-            .is_some_and(|start| now - start > SESSION_DURATION)
+            .is_some_and(|start| now.duration_since(start) > SESSION_DURATION)
 }
 
 impl Leapp {

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -57,8 +57,8 @@ pub struct Session {
     pub region: String,
     pub profile_id: Uuid,
     pub status: SessionStatus,
-    pub start_time: Option<DateTime<Utc>>,
-    pub session_token_expiration: Option<DateTime<Utc>>,
+    pub start_time: Option<Timestamp>,
+    pub session_token_expiration: Option<Timestamp>,
     pub kind: SessionKind,
 }
 

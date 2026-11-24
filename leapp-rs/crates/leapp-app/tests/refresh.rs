@@ -8,7 +8,7 @@ use common::{AppHarness, iam_user, mfa_iam_user};
 use leapp_core::{SecretStore, SessionId, SessionStatus};
 
 /// A token of the fake lives 36000 s. One second more and it is expired.
-const PAST_THE_TOKEN: chrono::Duration = chrono::Duration::seconds(36001);
+const PAST_THE_TOKEN: jiff::SignedDuration = jiff::SignedDuration::from_secs(36001);
 
 fn status(ui: &leapp_app::Ui, id: SessionId) -> SessionStatus {
     ui.workspace().session(id).unwrap().status

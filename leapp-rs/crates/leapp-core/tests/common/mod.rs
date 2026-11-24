@@ -243,7 +243,7 @@ impl Harness {
 
     /// Like `new`, with a `ManualClock` that starts at the real time.
     pub async fn with_manual_clock() -> (Harness, Arc<ManualClock>) {
-        let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
+        let clock = Arc::new(ManualClock(Mutex::new(jiff::Timestamp::now())));
         let c = clock.clone();
         let h = Self::with_clock(move |_| c).await;
         (h, clock)
@@ -253,7 +253,7 @@ impl Harness {
     pub async fn with_store_and_manual_clock(
         store: Arc<FlakyStore>,
     ) -> (Harness, Arc<ManualClock>) {
-        let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
+        let clock = Arc::new(ManualClock(Mutex::new(jiff::Timestamp::now())));
         let c: Arc<dyn Clock> = clock.clone();
         let h = Self::build(store.inner.clone(), store, |_| Some(c)).await;
         (h, clock)
@@ -327,20 +327,21 @@ impl Harness {
 }
 
 /// A clock that only moves when a test says so.
-pub struct ManualClock(Mutex<chrono::DateTime<chrono::Utc>>);
+pub struct ManualClock(Mutex<jiff::Timestamp>);
 
 impl ManualClock {
-    pub fn advance(&self, by: chrono::Duration) {
-        *self.0.lock().unwrap() += by;
+    pub fn advance(&self, by: jiff::SignedDuration) {
+        let mut now = self.0.lock().unwrap();
+        *now = now.checked_add(by).unwrap();
     }
 
-    pub fn set(&self, to: chrono::DateTime<chrono::Utc>) {
+    pub fn set(&self, to: jiff::Timestamp) {
         *self.0.lock().unwrap() = to;
     }
 }
 
 impl Clock for ManualClock {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+    fn now(&self) -> jiff::Timestamp {
         *self.0.lock().unwrap()
     }
 }
@@ -349,9 +350,9 @@ impl Clock for ManualClock {
 pub struct HookClock<F: Fn() + Send + Sync>(pub F);
 
 impl<F: Fn() + Send + Sync> Clock for HookClock<F> {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+    fn now(&self) -> jiff::Timestamp {
         (self.0)();
-        chrono::Utc::now()
+        jiff::Timestamp::now()
     }
 }
 
