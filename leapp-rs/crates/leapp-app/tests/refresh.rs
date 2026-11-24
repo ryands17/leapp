@@ -138,6 +138,15 @@ fn the_loop_runs_again_after_a_tick_panics() {
     // A later tick refreshes `second`.
     h.settle_with(|h| credentials(h).contains("fake-token-3"));
     assert_eq!(h.text_of(&format!("status-{b}")).as_deref(), Some("active"));
+
+    // The panic did not leave `first` `Pending`: it is `Inactive` and starts again.
+    h.settle(|ui| status(ui, a) == SessionStatus::Inactive);
+    assert_eq!(
+        h.text_of(&format!("status-{a}")).as_deref(),
+        Some("inactive")
+    );
+    start(&mut h, a);
+    assert_eq!(h.text_of(&format!("status-{a}")).as_deref(), Some("active"));
 }
 
 #[test]

@@ -75,6 +75,7 @@ impl Leapp {
             set_status(&mut state.ws, id, SessionStatus::Pending);
             key_generation(&state, id)
         };
+        let pending = PendingGuard::arm(&self.state, id);
 
         let result = self
             .activate_and_store_account(id, &profile, consent_carried, key_generation)
@@ -83,6 +84,7 @@ impl Leapp {
             let mut state = self.state.lock().unwrap();
             set_status(&mut state.ws, id, SessionStatus::Inactive);
         }
+        pending.disarm();
         result
     }
 
@@ -116,8 +118,11 @@ impl Leapp {
             set_status(&mut state.ws, id, SessionStatus::Pending);
             (profile, name, key_generation(&state, id))
         };
+        // A panic leaves the profile managed and our section in the file; `shutdown`, `startup`
+        // or the next start of the profile puts it right. The session must not stay `Pending`.
+        let pending = PendingGuard::arm(&self.state, id);
 
-        match self
+        let refresh = match self
             .activate_and_store_account(id, &profile, false, key_generation)
             .await
         {
@@ -145,7 +150,9 @@ impl Leapp {
                 errors.extend(released.err());
                 Refresh::Failed { name, errors }
             }
-        }
+        };
+        pending.disarm();
+        refresh
     }
 
     /// `activate`, then the account fetch if it got a new token (F1-R5).
@@ -574,6 +581,44 @@ impl Drop for Releasing<'_> {
             // A poisoned lock still holds valid data here: remove the mark all the same.
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.releasing.remove(p);
+        }
+    }
+}
+
+/// Sets a session back to `Inactive` if the start or refresh that set it `Pending` ends without
+/// a normal return: a panic or a dropped future. Without it the session stays `Pending` until
+/// a restart, and every start, stop, edit and delete of it is refused. Create it right after the
+/// critical section that sets `Pending`; call `disarm` on the normal paths, which set the status
+/// themselves. The drop changes only the memory; `startup` sets every status on disk again.
+struct PendingGuard<'a> {
+    state: &'a Mutex<State>,
+    id: SessionId,
+    armed: bool,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn arm(state: &'a Mutex<State>, id: SessionId) -> PendingGuard<'a> {
+        PendingGuard {
+            state,
+            id,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A poisoned lock still holds valid data here: clear the status all the same.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ws.session(self.id).map(|s| s.status) == Some(SessionStatus::Pending) {
+            set_inactive(&mut state.ws, self.id);
         }
     }
 }

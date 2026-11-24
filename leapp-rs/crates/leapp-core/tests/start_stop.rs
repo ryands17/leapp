@@ -1,6 +1,8 @@
 mod common;
 
-use common::Harness;
+use std::sync::Arc;
+
+use common::{FlakyStore, Harness, block_on};
 use leapp_core::{Error, SessionStatus};
 
 const DEV_ON_DEFAULT: &str = "[default]\naws_access_key_id = ASIAFAKE0001\naws_secret_access_key = fake-secret-1\naws_session_token = fake-token-1\nregion = eu-west-1\n";
@@ -196,5 +198,33 @@ async fn stop_of_an_inactive_session_does_nothing() {
     assert_eq!(
         h.credentials_text().as_deref(),
         Some("[default]\nmine = 1\n")
+    );
+}
+
+/// A panic in the middle of a start must not leave the session `Pending`: else every later
+/// start, stop, edit or delete of it is refused until the app restarts.
+// Multi-thread: the fake AWS server must answer the second start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_that_panics_leaves_the_session_inactive() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    store.panic_on_next_get(&format!("iam-user-{id}-access-key-id"));
+
+    let leapp = &h.leapp;
+    let first = std::thread::scope(|scope| scope.spawn(|| block_on(leapp.start(id))).join());
+
+    assert!(first.is_err(), "the first start panics");
+    assert_eq!(
+        h.leapp.workspace().session(id).unwrap().status,
+        SessionStatus::Inactive
+    );
+    h.leapp.start(id).await.unwrap();
+    assert_eq!(
+        h.leapp.workspace().session(id).unwrap().status,
+        SessionStatus::Active
     );
 }

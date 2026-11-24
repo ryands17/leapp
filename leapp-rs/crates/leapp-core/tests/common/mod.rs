@@ -65,12 +65,19 @@ pub struct FlakyStore {
     gates: Mutex<Vec<(String, Gate)>>,
     delete_gates: Mutex<Vec<(String, Gate)>>,
     set_gates: Mutex<Vec<(String, Gate)>>,
+    /// The next `get` of this key panics.
+    panic_on_get: Mutex<Option<String>>,
 }
 
 impl FlakyStore {
     /// The `(n+1)`-th `set` from now fails with `Error::Secret`. Later sets work again.
     pub fn fail_set_after(&self, n: usize) {
         *self.sets_before_failure.lock().unwrap() = Some(n);
+    }
+
+    /// The next `get` of `key` panics, one time.
+    pub fn panic_on_next_get(&self, key: &str) {
+        *self.panic_on_get.lock().unwrap() = Some(key.to_string());
     }
 
     /// A `get` of a key that starts with `key_prefix` waits until the gate opens.
@@ -121,6 +128,13 @@ fn pass_gates(gates: &Mutex<Vec<(String, Gate)>>, key: &str) {
 impl SecretStore for FlakyStore {
     fn get(&self, key: &str) -> Result<Option<String>> {
         pass_gates(&self.gates, key);
+        let armed = {
+            let mut armed = self.panic_on_get.lock().unwrap();
+            armed.take_if(|k| *k == key).is_some()
+        };
+        if armed {
+            panic!("the test store panics on a get");
+        }
         self.inner.get(key)
     }
 
@@ -324,6 +338,15 @@ impl Harness {
             mfa_device: None,
         }
     }
+}
+
+/// Runs `fut` on a new runtime on this thread.
+pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
 }
 
 /// A clock that only moves when a test says so.
