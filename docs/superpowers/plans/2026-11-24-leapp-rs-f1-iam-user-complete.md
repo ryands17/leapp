@@ -521,7 +521,35 @@ account number work, and a session stays active after 21 min.
 - [ ] **Step 4:** `cargo test --workspace`, clippy, fmt → clean.
 - [ ] **Step 5: Commit** `feat(leapp-app): refresh active sessions in the background`.
 
-### After Task 9
+### Task 10: Replace chrono with jiff (owner request, 2026-11-24)
+
+**Files:**
+- Modify: `leapp-rs/Cargo.toml` (workspace deps), `crates/*/Cargo.toml`, every `.rs` file that uses
+  `chrono` (core `config.rs`, `model.rs`, `store.rs`, `refresh.rs`, `sessions/iam_user.rs`,
+  `fake-aws/src/lib.rs`, the test helpers and tests of all three crates).
+- Test: `crates/leapp-core/tests/workspace_compat.rs` (new).
+
+**Interfaces:**
+- Produces: `jiff = { version = "1", features = ["serde"] }` replaces `chrono` in the workspace.
+  `cargo tree -i chrono` finds nothing.
+- Produces: instants are `jiff::Timestamp`; durations are `jiff::SignedDuration`.
+  `Clock::now(&self) -> jiff::Timestamp`. `TOKEN_REUSE_MARGIN` and `SESSION_DURATION` are
+  `jiff::SignedDuration` (values unchanged: 1200 s). `REFRESH_TICK` stays `std::time::Duration`.
+- Produces: `workspace.json` keeps RFC 3339 UTC timestamps (`...Z`). STS `Expiration` is parsed as
+  RFC 3339 into a `Timestamp`.
+
+- [ ] **Step 1: Write the failing test** `an_f0_workspace_file_still_loads` in
+  `tests/workspace_compat.rs`: a fixture `workspace.json` as chrono wrote it (fractional seconds,
+  `Z`, for example `"2026-11-24T10:00:00.123456789Z"` in `start_time` and
+  `session_token_expiration`) loads, and the times are the same instants; saving and loading again
+  keeps them equal.
+- [ ] **Step 2:** the test fails to compile (no jiff) → RED.
+- [ ] **Step 3: Implement.** Mechanical swap; no behavior change. All existing tests keep their
+  assertions (only the types change).
+- [ ] **Step 4:** `cargo test --workspace`, clippy, fmt → clean; `cargo tree -i chrono` → no match.
+- [ ] **Step 5: Commit** `refactor: replace chrono with jiff`.
+
+### After Task 10
 
 - Final whole-branch review (most capable model, with rust-review), one fix wave.
 - Owner check with real AWS (spec 15.4): an IAM User with MFA starts;
