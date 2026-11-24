@@ -76,6 +76,28 @@ Every core call from the UI runs off the render thread (`Ui::run`).
   - **F1-R9** Chained-session cascade on delete (spec 10.3) and pins are not built: chained roles
     are F3 and pins are F6. Those plans extend `delete_session`.
 
+## Tasks at a glance
+
+Each task has one implementer subagent and one reviewer subagent (the reviewer also runs
+rust-review). After Task 9, one reviewer checks the whole branch.
+
+| Task | Crate | What it builds |
+|---|---|---|
+| 1 | core | F0 review fixes: no backup or STS call after a quit; keychain reads outside the workspace lock; an error for a missing backup |
+| 2 | core | MFA on start (cancel → `Missing Multi Factor Authentication code`); a `Field` enum for input errors |
+| 3 | core | Token cache: a new token when less than 20 min is left; the account number from `GetCallerIdentity` after the first start |
+| 4 | core | Edit (an active session stops, saves, starts again; new keys drop the cached token) and delete (the user's own profile comes back) |
+| 5 | core | `refresh_tick`: rewrites sessions older than 20 min; a failure stops the session |
+| 6 | app | MFA dialog (6 digits only, Enter submits) in one question queue; the overwrite buttons look disabled for the first 0.5 s |
+| 7 | app | One form for create and edit: MFA device field, eye toggle on the secret, the core call off the UI thread, errors clear when you type, the dialog fits the smallest window |
+| 8 | app | Row menu (⋯ and right-click): Start/Stop, Edit, Copy account number, Delete with a confirm dialog; "Add session" button in the empty state |
+| 9 | app | Refresh loop every 10 s, failures in the toast; `CLAUDE.md` and the carry-forward list updated |
+
+Not in F1: deletion of chained sessions with their parent (F3) and pins (F6).
+
+After Task 9, the owner checks with real AWS: an IAM User with MFA starts, edit, delete and Copy
+account number work, and a session stays active after 21 min.
+
 ## Review Focus
 
 1. A user types an MFA code with a space or only 5 digits → the Submit button stays disabled. A code
