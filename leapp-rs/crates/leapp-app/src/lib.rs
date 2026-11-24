@@ -14,7 +14,7 @@ use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
 
 pub use bridge::{Bridge, Msg, UiPrompter};
-pub use views::create_dialog::CreateForm;
+pub use views::create_dialog::{CreateForm, FormMode};
 
 /// A question from core that waits for the user's answer. Dropping it without an answer means
 /// no (overwrite) or cancel (MFA).
@@ -102,6 +102,12 @@ impl Ui {
     /// The Create IAM User dialog.
     pub fn create_form(&self) -> &CreateForm {
         &self.create
+    }
+
+    /// Opens the session form in edit mode for session `id`, filled from the workspace. The key
+    /// fields stay empty. Ignored while a save runs, or if the session is gone.
+    pub fn open_edit(&mut self, id: SessionId) {
+        views::create_dialog::open_edit(self, id);
     }
 
     /// The profile of the overwrite question that the dialog shows now, if any.
@@ -267,6 +273,11 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             }
             Msg::AskMfa { session, reply } => {
                 s.questions.push_back(Question::Mfa { session, reply });
+            }
+            Msg::FormDone(result) => {
+                views::create_dialog::done(s, result);
+                // An edit can stop or start the session: show its real status.
+                s.refresh();
             }
         }
     }

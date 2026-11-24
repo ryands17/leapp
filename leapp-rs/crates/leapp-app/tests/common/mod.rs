@@ -4,12 +4,12 @@
 #![allow(dead_code)]
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use fake_aws::FakeAws;
 use leapp_app::{Bridge, Ui, UiPrompter};
-use leapp_core::{Config, Leapp, MemoryStore, NewIamUser};
+use leapp_core::{Config, Error, Leapp, MemoryStore, NewIamUser, SecretStore};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use tempfile::TempDir;
 
@@ -18,7 +18,10 @@ pub const SIZE: (f32, f32) = (1100.0, 700.0);
 pub struct AppHarness {
     pub home: TempDir,
     pub fake: FakeAws,
+    /// What the secret store holds. The same map as `store.inner`.
     pub secrets: Arc<MemoryStore>,
+    /// The secret store of the `Leapp`: `secrets`, and a write can be made to fail.
+    pub store: Arc<FlakyStore>,
     pub leapp: Arc<Leapp>,
     /// A clone of the Ui's bridge, so tests can send messages.
     pub bridge: Bridge,
@@ -40,10 +43,11 @@ impl AppHarness {
             .unwrap();
         let home = TempDir::new().unwrap();
         let fake = tokio.block_on(FakeAws::start());
-        let secrets = Arc::new(MemoryStore::default());
+        let store = Arc::new(FlakyStore::default());
+        let secrets = store.inner.clone();
         let bridge = Bridge::new();
         let prompter = Arc::new(UiPrompter::new(bridge.clone()));
-        let mut config = Config::new(home.path().to_path_buf(), secrets.clone(), prompter);
+        let mut config = Config::new(home.path().to_path_buf(), store.clone(), prompter);
         config.endpoints.sts = Some(fake.url());
         let leapp = Arc::new(Leapp::open(config).unwrap());
         let out = before(&leapp);
@@ -55,6 +59,7 @@ impl AppHarness {
             home,
             fake,
             secrets,
+            store,
             leapp,
             bridge,
             rt,
@@ -200,6 +205,24 @@ impl AppHarness {
             .is_some_and(|s| s.iter().any(|v| v == "disabled"))
     }
 
+    /// The placeholder of the text field inside the element `key`, from the accessibility tree.
+    pub fn placeholder_of(&self, key: &str) -> Option<String> {
+        fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+            if v["key"] == key {
+                return Some(v);
+            }
+            v["children"].as_array()?.iter().find_map(|c| find(c, key))
+        }
+        fn placeholder(v: &serde_json::Value) -> Option<String> {
+            if let Some(p) = v["placeholder"].as_str() {
+                return Some(p.to_string());
+            }
+            v["children"].as_array()?.iter().find_map(placeholder)
+        }
+        let tree = self.rt.accessibility_json();
+        placeholder(find(&tree, key)?)
+    }
+
     pub fn has(&self, key: &str) -> bool {
         self.rt.find(key).is_some()
     }
@@ -248,3 +271,67 @@ pub fn mfa_iam_user(name: &str, profile: &str) -> NewIamUser {
 }
 
 pub const MFA_DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
+
+/// A `MemoryStore` whose next `set` can be made to fail.
+#[derive(Default)]
+pub struct FlakyStore {
+    pub inner: Arc<MemoryStore>,
+    fail_next_set: Mutex<bool>,
+    hold: Mutex<Option<Gate>>,
+}
+
+/// Holds the `set` calls of a `FlakyStore` until `open`.
+#[derive(Clone, Default)]
+pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+impl Gate {
+    pub fn open(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+
+    /// Waits until the gate opens, or 10 s, so that a failed test does not hang the runtime.
+    fn pass(&self) {
+        let open = self.0.0.lock().unwrap();
+        let _ = self
+            .0
+            .1
+            .wait_timeout_while(open, Duration::from_secs(10), |open| !*open)
+            .unwrap();
+    }
+}
+
+impl FlakyStore {
+    /// The next `set` fails with `Error::Secret`. Later sets work again.
+    pub fn fail_next_set(&self) {
+        *self.fail_next_set.lock().unwrap() = true;
+    }
+
+    /// Every `set` from now waits until the gate opens.
+    pub fn hold_sets(&self) -> Gate {
+        let gate = Gate::default();
+        *self.hold.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+}
+
+impl SecretStore for FlakyStore {
+    fn get(&self, key: &str) -> leapp_core::Result<Option<String>> {
+        self.inner.get(key)
+    }
+
+    fn set(&self, key: &str, value: &str) -> leapp_core::Result<()> {
+        let gate = self.hold.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.pass();
+        }
+        if std::mem::take(&mut *self.fail_next_set.lock().unwrap()) {
+            return Err(Error::Secret("the test store refused the write".into()));
+        }
+        self.inner.set(key, value)
+    }
+
+    fn delete(&self, key: &str) -> leapp_core::Result<()> {
+        self.inner.delete(key)
+    }
+}
