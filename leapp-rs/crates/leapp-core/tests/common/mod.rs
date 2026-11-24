@@ -34,13 +34,15 @@ impl Prompter for ScriptedPrompter {
     }
 }
 
-/// A `MemoryStore` that can fail a chosen `set` and hold `get` calls until a gate opens.
+/// A `MemoryStore` that can fail a chosen `set` and hold `get` or `delete` calls until a gate
+/// opens.
 #[derive(Default)]
 pub struct FlakyStore {
     pub inner: Arc<MemoryStore>,
     /// Number of `set` calls that still succeed before one fails. `None`: no failure.
     sets_before_failure: Mutex<Option<usize>>,
     gates: Mutex<Vec<(String, Gate)>>,
+    delete_gates: Mutex<Vec<(String, Gate)>>,
 }
 
 impl FlakyStore {
@@ -58,21 +60,35 @@ impl FlakyStore {
             .push((key_prefix.to_string(), gate.clone()));
         gate
     }
+
+    /// A `delete` of a key that starts with `key_prefix` waits until the gate opens.
+    pub fn block_delete(&self, key_prefix: &str) -> Gate {
+        let gate = Gate::default();
+        self.delete_gates
+            .lock()
+            .unwrap()
+            .push((key_prefix.to_string(), gate.clone()));
+        gate
+    }
+}
+
+/// Waits at every gate in `gates` whose prefix starts `key`.
+fn pass_gates(gates: &Mutex<Vec<(String, Gate)>>, key: &str) {
+    let matching: Vec<Gate> = gates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(prefix, _)| key.starts_with(prefix.as_str()))
+        .map(|(_, g)| g.clone())
+        .collect();
+    for gate in matching {
+        gate.pass();
+    }
 }
 
 impl SecretStore for FlakyStore {
     fn get(&self, key: &str) -> Result<Option<String>> {
-        let gates: Vec<Gate> = self
-            .gates
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(prefix, _)| key.starts_with(prefix.as_str()))
-            .map(|(_, g)| g.clone())
-            .collect();
-        for gate in gates {
-            gate.pass();
-        }
+        pass_gates(&self.gates, key);
         self.inner.get(key)
     }
 
@@ -92,11 +108,12 @@ impl SecretStore for FlakyStore {
     }
 
     fn delete(&self, key: &str) -> Result<()> {
+        pass_gates(&self.delete_gates, key);
         self.inner.delete(key)
     }
 }
 
-/// Holds the `get` calls of a `FlakyStore` until `open`.
+/// Holds the `get` or `delete` calls of a `FlakyStore` until `open`.
 #[derive(Clone, Default)]
 pub struct Gate(Arc<(Mutex<GateState>, Condvar)>);
 
@@ -113,14 +130,14 @@ impl Gate {
         cv.notify_all();
     }
 
-    /// Waits until a `get` waits at this gate. Panics after 5 s.
+    /// Waits until a call waits at this gate. Panics after 5 s.
     pub fn wait_blocked(&self) {
         let (state, cv) = &*self.0;
         let guard = state.lock().unwrap();
         let (guard, _) = cv
             .wait_timeout_while(guard, std::time::Duration::from_secs(5), |s| s.waiting == 0)
             .unwrap();
-        assert!(guard.waiting > 0, "no get came to the gate");
+        assert!(guard.waiting > 0, "no call came to the gate");
     }
 
     fn pass(&self) {

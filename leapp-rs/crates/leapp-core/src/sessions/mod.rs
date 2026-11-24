@@ -2,6 +2,8 @@
 
 mod iam_user;
 
+use std::sync::Mutex;
+
 use uuid::Uuid;
 
 use crate::aws_files::CredentialsFile;
@@ -110,6 +112,7 @@ impl Leapp {
                 return Err(e);
             }
             state.ws = next;
+            let _mark = Releasing::mark(&self.state, &mut state, &released);
             drop(state);
             released.finish(self.config.secrets.as_ref());
             return if released.backup_missing {
@@ -207,6 +210,10 @@ impl Leapp {
             return Err(e);
         }
         state.ws = next;
+        let _marks: Vec<Releasing<'_>> = released
+            .iter()
+            .map(|r| Releasing::mark(&self.state, &mut state, r))
+            .collect();
         drop(state);
         for r in &released {
             r.finish(self.config.secrets.as_ref());
@@ -227,6 +234,11 @@ impl Leapp {
     async fn activate(&self, id: SessionId, profile: &str, consent_carried: bool) -> Result<()> {
         let (session, existing) = {
             let state = self.state.lock().unwrap();
+            // A stop of this profile still deletes the old backup. A new backup now would be
+            // deleted with it.
+            if state.releasing.contains(profile) {
+                return Err(releasing_error(profile));
+            }
             (
                 state.ws.session(id).ok_or(Error::NotFound(id))?.clone(),
                 state.ws.managed_profiles.get(profile).cloned(),
@@ -413,6 +425,38 @@ impl Released {
     }
 }
 
+/// Marks a profile as releasing while its backup is deleted outside the lock. The drop takes the
+/// lock again and removes the mark, on every path. Create it under the lock, in the same critical
+/// section that removes the managed entry; drop it only after the guard is dropped.
+struct Releasing<'a> {
+    state: &'a Mutex<State>,
+    profile: Option<String>,
+}
+
+impl<'a> Releasing<'a> {
+    /// Marks the profile of `released` if it has a backup to delete; else does nothing.
+    fn mark(state: &'a Mutex<State>, locked: &mut State, released: &Released) -> Releasing<'a> {
+        let profile = released
+            .backup_key
+            .as_ref()
+            .map(|_| released.profile.clone());
+        if let Some(p) = &profile {
+            locked.releasing.insert(p.clone());
+        }
+        Releasing { state, profile }
+    }
+}
+
+impl Drop for Releasing<'_> {
+    fn drop(&mut self) {
+        if let Some(p) = &self.profile {
+            // A poisoned lock still holds valid data here: remove the mark all the same.
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.releasing.remove(p);
+        }
+    }
+}
+
 /// The profile of an `Active` session and its managed entry. `None` if the session is `Inactive`.
 fn stop_target(state: &State, id: SessionId) -> Result<Option<(String, Option<ManagedProfile>)>> {
     let session = state.ws.session(id).ok_or(Error::NotFound(id))?;
@@ -503,6 +547,12 @@ fn pending_on(ws: &Workspace, profile_id: Uuid) -> bool {
 
 fn pending_error() -> Error {
     Error::ProfilePending("Another session with the same named profile is starting".into())
+}
+
+fn releasing_error(profile: &str) -> Error {
+    Error::ProfilePending(format!(
+        "Another session with the named profile \"{profile}\" is stopping"
+    ))
 }
 
 fn set_status(ws: &mut Workspace, id: SessionId, status: SessionStatus) {

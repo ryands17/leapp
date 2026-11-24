@@ -106,6 +106,54 @@ async fn a_stop_does_not_hold_the_lock_while_the_keychain_reads() {
     assert_eq!(h.credentials_text().as_deref(), Some(MINE));
 }
 
+/// Runs `fut` on a new runtime on this thread.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
+}
+
+// Multi-thread: the fake AWS server must answer while this thread waits on the scoped threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_while_a_stop_deletes_the_backup_waits_its_turn() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
+    let a = h
+        .leapp
+        .create_iam_user(h.iam_user("dev-a", "default"))
+        .unwrap();
+    let b = h
+        .leapp
+        .create_iam_user(h.iam_user("dev-b", "default"))
+        .unwrap();
+    h.leapp.start(a).await.unwrap();
+
+    let gate = store.block_delete("aws-profile-backup-");
+    let leapp = &h.leapp;
+    let (early_start, stopped) = std::thread::scope(|scope| {
+        let stopper = scope.spawn(|| block_on(leapp.stop(a)));
+        gate.wait_blocked();
+
+        let early_start = scope.spawn(|| block_on(leapp.start(b))).join().unwrap();
+
+        gate.open();
+        (early_start, stopper.join().unwrap())
+    });
+
+    assert!(
+        matches!(early_start, Err(Error::ProfilePending(_))),
+        "{early_start:?}"
+    );
+    stopped.unwrap();
+    h.leapp.start(b).await.unwrap();
+    h.leapp.stop(b).await.unwrap();
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+}
+
 #[tokio::test]
 async fn a_failed_second_secret_write_leaves_no_session_and_no_keys() {
     let store = Arc::new(FlakyStore::default());

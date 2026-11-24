@@ -9,6 +9,7 @@ mod secrets;
 mod sessions;
 mod store;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -35,6 +36,10 @@ struct State {
     /// the workspace or a backup. It is in the same lock as `ws`, so a start sees it before its
     /// write-ahead save or not at all.
     closing: bool,
+    /// Profiles whose stop or cleanup restored the user's section and still deletes the backup
+    /// (outside the lock). A start on such a profile returns `Error::ProfilePending`, so that it
+    /// cannot write a new backup that this delete then removes.
+    releasing: HashSet<String>,
 }
 
 impl Leapp {
@@ -47,6 +52,7 @@ impl Leapp {
             state: Mutex::new(State {
                 ws: workspace,
                 closing: false,
+                releasing: HashSet::new(),
             }),
         })
     }
