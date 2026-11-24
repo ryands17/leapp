@@ -2,11 +2,14 @@
 
 mod iam_user;
 
+use iam_user::Issued;
+pub use iam_user::TOKEN_REUSE_MARGIN;
+
 use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use crate::aws_files::CredentialsFile;
+use crate::aws_files::{CredentialsFile, SectionBody};
 use crate::error::{Error, Field, Result};
 use crate::model::{ManagedProfile, SessionId, SessionKind, SessionStatus, Workspace};
 use crate::secrets::SecretStore;
@@ -61,12 +64,31 @@ impl Leapp {
             set_status(&mut state.ws, id, SessionStatus::Pending);
         }
 
-        let result = self.activate(id, &profile, consent_carried).await;
-        if result.is_err() {
-            let mut state = self.state.lock().unwrap();
-            set_status(&mut state.ws, id, SessionStatus::Inactive);
+        match self.activate(id, &profile, consent_carried).await {
+            Ok(fresh) => {
+                // Only a start that called `GetSessionToken` gets here with credentials, and only
+                // while the session has no account (F1-R5).
+                if let Some(temp) = fresh
+                    && self.account_missing(id)
+                {
+                    self.store_account(id, &temp).await;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let mut state = self.state.lock().unwrap();
+                set_status(&mut state.ws, id, SessionStatus::Inactive);
+                Err(e)
+            }
         }
-        result
+    }
+
+    fn account_missing(&self, id: SessionId) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .ws
+            .session(id)
+            .is_some_and(|s| matches!(&s.kind, SessionKind::IamUser { account: None, .. }))
     }
 
     /// Stops a session: puts its profile section back as it was (the user's saved section, or
@@ -231,7 +253,12 @@ impl Leapp {
     /// With `consent_carried`, the user already agreed to replace the section of `profile` (a
     /// session switch on the same profile), so it does not ask again. The section that the stop
     /// put back is saved again as the backup.
-    async fn activate(&self, id: SessionId, profile: &str, consent_carried: bool) -> Result<()> {
+    async fn activate(
+        &self,
+        id: SessionId,
+        profile: &str,
+        consent_carried: bool,
+    ) -> Result<Option<SectionBody>> {
         let (session, existing) = {
             let state = self.state.lock().unwrap();
             // A stop of this profile still deletes the old backup. A new backup now would be
@@ -290,7 +317,7 @@ impl Leapp {
             .write_active(id, profile, &session, &file, had_original, managed_already)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(fresh) => Ok(fresh),
             Err((e, fate)) => {
                 // The backup is the only copy of the user's section. Delete it only if the
                 // credentials file and the workspace are back to how they were before.
@@ -315,8 +342,12 @@ impl Leapp {
         file: &CredentialsFile,
         had_original: bool,
         managed_already: bool,
-    ) -> std::result::Result<(), (Error, BackupFate)> {
-        let (body, expiration) = match session.kind {
+    ) -> std::result::Result<Option<SectionBody>, (Error, BackupFate)> {
+        let Issued {
+            body,
+            expiration,
+            fresh,
+        } = match session.kind {
             SessionKind::IamUser { .. } => self
                 .iam_user_credentials(session)
                 .await
@@ -367,7 +398,7 @@ impl Leapp {
             return Err((e, fate));
         }
         state.ws = next;
-        Ok(())
+        Ok(fresh.then_some(body))
     }
 
     /// Takes the write-ahead entry out again after the file is back to how it was. An entry that

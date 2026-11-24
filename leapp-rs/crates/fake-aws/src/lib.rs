@@ -1,7 +1,7 @@
 //! A fake AWS STS server for tests.
 //!
 //! The pinned `aws-sdk-sts` uses the Query protocol: a form-encoded body with
-//! `Action=<name>`. This server answers `GetSessionToken` in that protocol.
+//! `Action=<name>`. This server answers `GetSessionToken` and `GetCallerIdentity` in that protocol.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -33,6 +33,7 @@ struct Inner {
     failures: HashMap<String, VecDeque<Failure>>,
     delays: HashMap<String, VecDeque<Duration>>,
     issued: usize,
+    account: Option<String>,
 }
 
 type Shared = Arc<Mutex<Inner>>;
@@ -90,6 +91,16 @@ impl FakeAws {
             .push_back(failure);
     }
 
+    /// The account number that `GetCallerIdentity` answers. Default `123456789012`.
+    pub fn account(&self) -> String {
+        account_of(&self.inner.lock().unwrap())
+    }
+
+    /// Change the account number that `GetCallerIdentity` answers.
+    pub fn set_account(&self, account: &str) {
+        self.inner.lock().unwrap().account = Some(account.to_owned());
+    }
+
     /// The next call of `action` waits for `delay` before it gets its answer.
     pub fn delay_next(&self, action: &str, delay: Duration) {
         let mut inner = self.inner.lock().unwrap();
@@ -107,6 +118,13 @@ impl Drop for FakeAws {
     }
 }
 
+fn account_of(inner: &Inner) -> String {
+    inner
+        .account
+        .clone()
+        .unwrap_or_else(|| "123456789012".to_owned())
+}
+
 async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -> Response {
     let params = parse_form(&body);
     let action = params.get("Action").cloned().unwrap_or_default();
@@ -115,7 +133,7 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
         .and_then(|v| v.to_str().ok())
         .and_then(access_key_from_authorization);
 
-    let (failure, delay, n) = {
+    let (failure, delay, n, account) = {
         let mut inner = inner.lock().unwrap();
         inner.requests.push(Recorded {
             action: action.clone(),
@@ -133,7 +151,7 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
         } else {
             0
         };
-        (failure, delay, n)
+        (failure, delay, n, account_of(&inner))
     };
 
     if let Some(delay) = delay {
@@ -146,6 +164,17 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
             f.code, f.message
         );
         return (status, [(header::CONTENT_TYPE, "text/xml")], xml).into_response();
+    }
+    if action == "GetCallerIdentity" {
+        let xml = format!(
+            r#"<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult>
+    <Arn>arn:aws:iam::{account}:user/fake</Arn><UserId>AIDAFAKE</UserId><Account>{account}</Account>
+  </GetCallerIdentityResult>
+  <ResponseMetadata><RequestId>fake-id</RequestId></ResponseMetadata>
+</GetCallerIdentityResponse>"#
+        );
+        return ([(header::CONTENT_TYPE, "text/xml")], xml).into_response();
     }
     if action != "GetSessionToken" {
         let xml = "<ErrorResponse><Error><Type>Sender</Type><Code>InvalidAction</Code><Message>The fake server does not know this action.</Message></Error><RequestId>fake-err</RequestId></ErrorResponse>";

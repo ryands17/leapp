@@ -22,6 +22,7 @@ pub use model::{
     Workspace,
 };
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};
+pub use sessions::TOKEN_REUSE_MARGIN;
 
 pub struct Leapp {
     config: Config,

@@ -229,6 +229,14 @@ impl Harness {
         }
     }
 
+    /// Like `new`, with a `ManualClock` that starts at the real time.
+    pub async fn with_manual_clock() -> (Harness, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
+        let c = clock.clone();
+        let h = Self::with_clock(move |_| c).await;
+        (h, clock)
+    }
+
     /// Drops the `Leapp` without `shutdown` and opens a new one on the same folders.
     pub fn reopen(self) -> Harness {
         let Harness {
@@ -293,6 +301,25 @@ impl Harness {
             region: "eu-west-1".to_string(),
             mfa_device: None,
         }
+    }
+}
+
+/// A clock that only moves when a test says so.
+pub struct ManualClock(Mutex<chrono::DateTime<chrono::Utc>>);
+
+impl ManualClock {
+    pub fn advance(&self, by: chrono::Duration) {
+        *self.0.lock().unwrap() += by;
+    }
+
+    pub fn set(&self, to: chrono::DateTime<chrono::Utc>) {
+        *self.0.lock().unwrap() = to;
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        *self.0.lock().unwrap()
     }
 }
 

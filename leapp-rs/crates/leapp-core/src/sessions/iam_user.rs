@@ -11,11 +11,23 @@ use serde::{Deserialize, Serialize};
 use crate::Leapp;
 use crate::aws_files::SectionBody;
 use crate::error::{Error, Result};
-use crate::model::{Session, SessionKind};
+use crate::model::{Session, SessionId, SessionKind};
 use crate::regions::DEFAULT_REGION;
 
 const TOKEN_DURATION_SECONDS: i32 = 36000;
 const STS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A cached token is reused only while it has more than this left (F1-R1). It equals the refresh
+/// age, so the credentials in the file stay valid until the next refresh.
+pub const TOKEN_REUSE_MARGIN: chrono::Duration = chrono::Duration::seconds(1200);
+
+/// Temporary credentials for a session.
+pub(crate) struct Issued {
+    pub body: SectionBody,
+    pub expiration: DateTime<Utc>,
+    /// `true` if this call got a new token from `GetSessionToken`.
+    pub fresh: bool,
+}
 
 /// The cached `GetSessionToken` result. It is stored in the secret store only.
 #[derive(Serialize, Deserialize)]
@@ -27,10 +39,7 @@ struct CachedToken {
 
 impl Leapp {
     /// Temporary credentials for the session, and when they expire.
-    pub(crate) async fn iam_user_credentials(
-        &self,
-        session: &Session,
-    ) -> Result<(SectionBody, DateTime<Utc>)> {
+    pub(crate) async fn iam_user_credentials(&self, session: &Session) -> Result<Issued> {
         let secrets = &self.config.secrets;
         let token_key = format!("iam-user-{}-session-token", session.id);
         let region = if session.region.trim().is_empty() {
@@ -40,11 +49,15 @@ impl Leapp {
         };
 
         if let Some(expiration) = session.session_token_expiration
-            && expiration > self.config.clock.now()
+            && expiration - self.config.clock.now() > TOKEN_REUSE_MARGIN
             && let Some(json) = secrets.get(&token_key)?
             && let Ok(token) = serde_json::from_str::<CachedToken>(&json)
         {
-            return Ok((body(token, region), expiration));
+            return Ok(Issued {
+                body: body(token, region),
+                expiration,
+                fresh: false,
+            });
         }
 
         let access_key_id = secrets
@@ -73,30 +86,12 @@ impl Leapp {
             None => None,
         };
 
-        let mut config = aws_sdk_sts::Config::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(region.clone()))
-            .credentials_provider(Credentials::new(
-                access_key_id.trim(),
-                secret_access_key.trim(),
-                None,
-                None,
-                "leapp-rs",
-            ))
-            .timeout_config(
-                TimeoutConfig::builder()
-                    .operation_timeout(STS_TIMEOUT)
-                    .build(),
-            )
-            .retry_config(RetryConfig::standard().with_max_attempts(1));
-        if let Some(url) = &self.config.endpoints.sts {
-            config = config.endpoint_url(url);
-        }
+        let client = self.sts_client(&access_key_id, &secret_access_key, None, &region);
         // After `shutdown` began, no new call to AWS.
         if self.state.lock().unwrap().closing {
             return Err(Error::Closing);
         }
-        let mut call = aws_sdk_sts::Client::from_conf(config.build())
+        let mut call = client
             .get_session_token()
             .duration_seconds(TOKEN_DURATION_SECONDS);
         if let Some((serial, code)) = token_code {
@@ -116,7 +111,81 @@ impl Leapp {
             session_token: credentials.session_token().trim().to_string(),
         };
         secrets.set(&token_key, &serde_json::to_string(&token)?)?;
-        Ok((body(token, region), expiration))
+        Ok(Issued {
+            body: body(token, region),
+            expiration,
+            fresh: true,
+        })
+    }
+
+    /// An STS client with fixed credentials, the session region, one try and a timeout.
+    fn sts_client(
+        &self,
+        access_key_id: &str,
+        secret_access_key: &str,
+        session_token: Option<String>,
+        region: &str,
+    ) -> aws_sdk_sts::Client {
+        let mut config = aws_sdk_sts::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new(region.to_string()))
+            .credentials_provider(Credentials::new(
+                access_key_id.trim(),
+                secret_access_key.trim(),
+                session_token,
+                None,
+                "leapp-rs",
+            ))
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(STS_TIMEOUT)
+                    .build(),
+            )
+            .retry_config(RetryConfig::standard().with_max_attempts(1));
+        if let Some(url) = &self.config.endpoints.sts {
+            config = config.endpoint_url(url);
+        }
+        aws_sdk_sts::Client::from_conf(config.build())
+    }
+
+    /// Asks AWS for the account number with the temporary credentials and saves it, if the
+    /// session still has none. Any failure is dropped: the start already succeeded (F1-R5).
+    /// No lock is held during the call.
+    pub(crate) async fn store_account(&self, id: SessionId, temp: &SectionBody) {
+        if self.state.lock().unwrap().closing {
+            return;
+        }
+        let client = self.sts_client(
+            &temp.access_key_id,
+            &temp.secret_access_key,
+            Some(temp.session_token.clone()),
+            &temp.region,
+        );
+        let Ok(output) = client.get_caller_identity().send().await else {
+            return;
+        };
+        let Some(account) = output.account().map(|a| a.trim().to_string()) else {
+            return;
+        };
+        if account.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.closing {
+            return;
+        }
+        let mut next = state.ws.clone();
+        let Some(session) = next.sessions.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        let SessionKind::IamUser { account: slot, .. } = &mut session.kind;
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(account);
+        if crate::store::save(&self.workspace_path, &next).is_ok() {
+            state.ws = next;
+        }
     }
 }
 
