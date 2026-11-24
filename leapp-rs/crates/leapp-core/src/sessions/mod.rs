@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::aws_files::{CredentialsFile, SectionBody};
 use crate::error::{Error, Field, Result};
 use crate::model::{ManagedProfile, SessionId, SessionKind, SessionStatus, Workspace};
+use crate::refresh::{Refresh, is_due};
 use crate::secrets::SecretStore;
 use crate::store;
 use crate::{Leapp, State};
@@ -75,23 +76,95 @@ impl Leapp {
             key_generation(&state, id)
         };
 
-        match self.activate(id, &profile, consent_carried).await {
-            Ok(fresh) => {
-                // Only a start that called `GetSessionToken` gets here with credentials, and only
-                // while the session has no account (F1-R5).
-                if let Some(temp) = fresh
-                    && self.account_missing(id)
-                {
-                    self.store_account(id, &temp, key_generation).await;
-                }
-                Ok(())
+        let result = self
+            .activate_and_store_account(id, &profile, consent_carried, key_generation)
+            .await;
+        if result.is_err() {
+            let mut state = self.state.lock().unwrap();
+            set_status(&mut state.ws, id, SessionStatus::Inactive);
+        }
+        result
+    }
+
+    /// Refreshes one old `Active` session (spec 10.4): steps 3 to 6 of 10.1 on the profile that
+    /// the session already manages, so no overwrite question. The session is skipped (no
+    /// failure) if it is no longer due, an edit has it reserved, a stop of its profile still
+    /// deletes a backup, or `shutdown` began. On an error the profile is released as `stop`
+    /// does and the session is `Inactive`.
+    ///
+    /// This function does blocking file and keychain I/O. Call it from a task that may block.
+    pub(crate) async fn refresh_session(&self, id: SessionId) -> Refresh {
+        let (profile, name, key_generation) = {
+            let mut state = self.state.lock().unwrap();
+            if state.closing {
+                return Refresh::Skipped;
             }
+            let now = self.config.clock.now();
+            let Some(session) = state.ws.session(id).filter(|s| is_due(s, now)) else {
+                return Refresh::Skipped;
+            };
+            let Ok(profile) = profile_name(&state.ws, session.profile_id) else {
+                return Refresh::Skipped;
+            };
+            if state.editing.contains(&id)
+                || state.releasing.contains(&profile)
+                || pending_on(&state.ws, session.profile_id)
+            {
+                return Refresh::Skipped;
+            }
+            let name = session.name.clone();
+            set_status(&mut state.ws, id, SessionStatus::Pending);
+            (profile, name, key_generation(&state, id))
+        };
+
+        match self
+            .activate_and_store_account(id, &profile, false, key_generation)
+            .await
+        {
+            Ok(()) => Refresh::Done,
             Err(e) => {
-                let mut state = self.state.lock().unwrap();
-                set_status(&mut state.ws, id, SessionStatus::Inactive);
-                Err(e)
+                let closing = matches!(e, Error::Closing);
+                // `shutdown` releases the profile itself.
+                let released = if closing {
+                    Ok(())
+                } else {
+                    self.release(id, true)
+                };
+                {
+                    // A failed release leaves the session `Pending`; the managed entry and the
+                    // backup stay, so `shutdown` or `startup` puts the user's section back.
+                    let mut state = self.state.lock().unwrap();
+                    if state.ws.session(id).map(|s| s.status) == Some(SessionStatus::Pending) {
+                        set_inactive(&mut state.ws, id);
+                    }
+                }
+                if closing {
+                    return Refresh::Skipped;
+                }
+                let mut errors = vec![e];
+                errors.extend(released.err());
+                Refresh::Failed { name, errors }
             }
         }
+    }
+
+    /// `activate`, then the account fetch if it got a new token (F1-R5).
+    async fn activate_and_store_account(
+        &self,
+        id: SessionId,
+        profile: &str,
+        consent_carried: bool,
+        key_generation: u64,
+    ) -> Result<()> {
+        let fresh = self.activate(id, profile, consent_carried).await?;
+        // Only an activation that called `GetSessionToken` gets here with credentials, and only
+        // while the session has no account.
+        if let Some(temp) = fresh
+            && self.account_missing(id)
+        {
+            self.store_account(id, &temp, key_generation).await;
+        }
+        Ok(())
     }
 
     fn account_missing(&self, id: SessionId) -> bool {
@@ -113,16 +186,22 @@ impl Leapp {
     /// This function does blocking file and keychain I/O. Call it from a task that may block (the
     /// UI calls it from its tokio bridge, not the render thread).
     pub async fn stop(&self, id: SessionId) -> Result<()> {
+        self.release(id, false)
+    }
+
+    /// The body of `stop`. With `owner_pending`, the caller set the session `Pending` itself (a
+    /// failed refresh) and releases it from that status; else a `Pending` session is refused.
+    fn release(&self, id: SessionId, owner_pending: bool) -> Result<()> {
         let mut retried = false;
         loop {
-            let seen = stop_target(&self.state.lock().unwrap(), id)?;
+            let seen = stop_target(&self.state.lock().unwrap(), id, owner_pending)?;
             let Some((profile, entry)) = seen else {
                 return Ok(());
             };
             let backup = self.read_backup(&profile, entry.as_ref(), id)?;
 
             let mut state = self.state.lock().unwrap();
-            let Some((now_profile, now_entry)) = stop_target(&state, id)? else {
+            let Some((now_profile, now_entry)) = stop_target(&state, id, owner_pending)? else {
                 return Ok(());
             };
             let backup = if now_profile == profile && now_entry == entry {
@@ -499,13 +578,18 @@ impl Drop for Releasing<'_> {
     }
 }
 
-/// The profile of an `Active` session and its managed entry. `None` if the session is `Inactive`.
-fn stop_target(state: &State, id: SessionId) -> Result<Option<(String, Option<ManagedProfile>)>> {
+/// The profile of an `Active` session (with `owner_pending`: a `Pending` one) and its managed
+/// entry. `None` if the session is `Inactive`.
+fn stop_target(
+    state: &State,
+    id: SessionId,
+    owner_pending: bool,
+) -> Result<Option<(String, Option<ManagedProfile>)>> {
     let session = state.ws.session(id).ok_or(Error::NotFound(id))?;
-    match session.status {
-        SessionStatus::Inactive => return Ok(None),
-        SessionStatus::Pending => return Err(pending_error()),
-        SessionStatus::Active => {}
+    match (session.status, owner_pending) {
+        (SessionStatus::Inactive, _) => return Ok(None),
+        (SessionStatus::Active, false) | (SessionStatus::Pending, true) => {}
+        _ => return Err(pending_error()),
     }
     let profile = profile_name(&state.ws, session.profile_id)?;
     let entry = state.ws.managed_profiles.get(&profile).cloned();

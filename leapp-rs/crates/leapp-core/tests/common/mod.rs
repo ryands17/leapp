@@ -249,6 +249,16 @@ impl Harness {
         (h, clock)
     }
 
+    /// Like `with_store`, with a `ManualClock` that starts at the real time.
+    pub async fn with_store_and_manual_clock(
+        store: Arc<FlakyStore>,
+    ) -> (Harness, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
+        let c: Arc<dyn Clock> = clock.clone();
+        let h = Self::build(store.inner.clone(), store, |_| Some(c)).await;
+        (h, clock)
+    }
+
     /// Drops the `Leapp` without `shutdown` and opens a new one on the same folders.
     pub fn reopen(self) -> Harness {
         let Harness {

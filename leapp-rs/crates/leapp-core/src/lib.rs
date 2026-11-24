@@ -4,6 +4,7 @@ mod aws_files;
 mod config;
 mod error;
 mod model;
+mod refresh;
 pub mod regions;
 mod secrets;
 mod sessions;
@@ -21,6 +22,7 @@ pub use model::{
     IamUserUpdate, ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind,
     SessionStatus, Workspace,
 };
+pub use refresh::{REFRESH_TICK, RefreshFailure, RefreshReport, SESSION_DURATION};
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};
 pub use sessions::TOKEN_REUSE_MARGIN;
 
