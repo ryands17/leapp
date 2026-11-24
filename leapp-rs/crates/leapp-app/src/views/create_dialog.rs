@@ -204,18 +204,30 @@ fn submit(s: &mut Ui, _tx: &mut Tx) {
     s.create.saving = true;
     let leapp = s.leapp.clone();
     let bridge = s.bridge.clone();
-    let send = move |result| bridge.send(Msg::FormDone(result));
-    match s.create.mode {
+    let task = match s.create.mode {
         FormMode::Create => {
             let req = s.create.new_iam_user();
             // `create_iam_user` does blocking keychain and file I/O.
-            s.rt.spawn_blocking(move || send(leapp.create_iam_user(req).map(drop)));
+            s.rt.spawn_blocking(move || leapp.create_iam_user(req).map(drop))
         }
         FormMode::Edit(id) => {
             let req = s.create.update();
-            s.rt.spawn(async move { send(leapp.update_iam_user(id, req).await) });
+            s.rt.spawn(async move { leapp.update_iam_user(id, req).await })
         }
-    }
+    };
+    // Always send a result, also if the task panics: else the form stays locked.
+    s.rt.spawn(async move { bridge.send(Msg::FormDone(save_result(task).await)) });
+}
+
+/// The result of the save task. A task that panics or is cancelled gives an error.
+async fn save_result(
+    task: tokio::task::JoinHandle<leapp_core::Result<()>>,
+) -> leapp_core::Result<()> {
+    task.await.unwrap_or_else(|_| {
+        Err(Error::Io(std::io::Error::other(
+            "the save stopped unexpectedly; try again",
+        )))
+    })
 }
 
 /// The result of [`submit`]. Success closes the dialog. An error shows under its field, or
@@ -488,4 +500,23 @@ fn buttons(k: &Kit, editing: bool, saving: bool) -> El {
                 .build(k)
                 .key("btn-create-submit"),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_save_gives_an_error() {
+        let task = tokio::spawn(async { panic!("the core call panics") });
+        let err = save_result(task).await.expect_err("an error");
+        assert_eq!(err.to_string(), "the save stopped unexpectedly; try again");
+    }
+
+    #[tokio::test]
+    async fn a_finished_save_keeps_its_result() {
+        assert!(save_result(tokio::spawn(async { Ok(()) })).await.is_ok());
+        let task = tokio::spawn(async { Err(Error::Closing) });
+        assert!(matches!(save_result(task).await, Err(Error::Closing)));
+    }
 }

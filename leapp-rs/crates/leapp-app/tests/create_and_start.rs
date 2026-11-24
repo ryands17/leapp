@@ -262,6 +262,18 @@ fn typing_in_a_field_clears_its_error() {
     assert!(!h.has("err-secret-key"));
 }
 
+/// The caret x offset inside the text input `key`. Plain glyphs and bullets have different
+/// widths, so it shows if the field draws the secret or masks it.
+fn caret_x(h: &AppHarness, key: &str) -> f32 {
+    let suffix = format!("{key}/value/input");
+    let input =
+        h.rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("no text input {key:?}"));
+    input.caret.expect("the field has a caret")[0] - input.rect[0]
+}
+
 #[test]
 fn the_eye_shows_the_secret() {
     let mut h = AppHarness::new();
@@ -275,6 +287,8 @@ fn the_eye_shows_the_secret() {
         h.text_of("btn-secret-eye").as_deref(),
         Some("Show secret key")
     );
+
+    let masked_caret = caret_x(&h, "fld-secret-key");
 
     h.tap("btn-secret-eye");
     assert!(
@@ -293,6 +307,11 @@ fn the_eye_shows_the_secret() {
     assert!(
         !h.tree_contains("SECRET-dev"),
         "a shown secret is not in the element tree"
+    );
+    assert_ne!(
+        caret_x(&h, "fld-secret-key"),
+        masked_caret,
+        "the field draws plain text, not bullets"
     );
 
     h.tap("btn-secret-eye");
