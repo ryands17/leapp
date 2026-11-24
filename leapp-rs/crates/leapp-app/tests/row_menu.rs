@@ -133,6 +133,7 @@ fn delete_asks_then_deletes() {
     assert_eq!(h.text_of("btn-delete-yes").as_deref(), Some("Delete"));
     assert_eq!(h.text_of("btn-delete-no").as_deref(), Some("Cancel"));
 
+    h.wait_for_arming();
     h.tap("btn-delete-no");
     h.frames(30);
     assert!(!h.has("dlg-delete"));
@@ -141,6 +142,7 @@ fn delete_asks_then_deletes() {
 
     open_menu(&mut h, id);
     h.tap_menu_item(id, "Delete session");
+    h.wait_for_arming();
     h.tap("btn-delete-yes");
     h.settle(|ui| ui.workspace().session(id).is_none());
 
@@ -156,6 +158,25 @@ fn delete_asks_then_deletes() {
 }
 
 #[test]
+fn delete_ignores_answers_until_armed() {
+    let (mut h, id) = with_session();
+    open_menu(&mut h, id);
+    h.tap_menu_item(id, "Delete session");
+
+    h.tap("btn-delete-yes");
+    h.frames(3);
+    assert!(h.has("dlg-delete"), "an early answer is ignored");
+    assert!(h.leapp.workspace().session(id).is_some());
+    assert!(h.is_disabled("btn-delete-yes"));
+    assert!(h.is_disabled("btn-delete-no"));
+
+    h.wait_for_arming();
+    assert!(!h.is_disabled("btn-delete-yes"));
+    h.tap("btn-delete-yes");
+    h.settle(|ui| ui.workspace().session(id).is_none());
+}
+
+#[test]
 fn a_failed_delete_shows_its_error() {
     let (mut h, id) = with_session();
     open_menu(&mut h, id);
@@ -164,6 +185,7 @@ fn a_failed_delete_shows_its_error() {
     let leapp = h.leapp.clone();
     h.block_on(leapp.delete_session(id)).unwrap();
 
+    h.wait_for_arming();
     h.tap("btn-delete-yes");
     h.settle(|ui| ui.error().is_some());
 

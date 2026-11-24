@@ -43,6 +43,10 @@ pub(crate) struct RowMenu {
 pub(crate) struct DeleteAsk {
     pub(crate) id: SessionId,
     pub(crate) name: String,
+    /// When the confirm was first polled; `None` before that.
+    since: Option<f64>,
+    /// True [`CONFIRM_ARM_SECONDS`] after `since`: the buttons take answers.
+    pub(crate) armed: bool,
 }
 
 /// True if `code`, without the spaces around it, is exactly 6 ASCII digits.
@@ -242,8 +246,10 @@ impl Ui {
                 self.mark_starting();
                 let leapp = self.leapp.clone();
                 let bridge = self.bridge.clone();
+                let task = self.rt.spawn(async move { leapp.start(id).await });
+                // Always send `StartDone`, also if the task panics: else the row stays Pending.
                 self.rt.spawn(async move {
-                    let error = leapp.start(id).await.err().map(|e| e.to_string());
+                    let error = start_result(task).await.err().map(|e| e.to_string());
                     bridge.send(Msg::StartDone { id, error });
                 });
             }
@@ -301,13 +307,19 @@ impl Ui {
             self.delete = Some(DeleteAsk {
                 id,
                 name: session.name.clone(),
+                since: None,
+                armed: false,
             });
         }
     }
 
     /// Answers the delete confirm. Yes deletes the session off the render thread; an error
     /// shows in the toast.
+    /// Ignored until the confirm is armed: a fast double-click cannot delete.
     pub(crate) fn answer_delete(&mut self, yes: bool) {
+        if !self.delete.as_ref().is_some_and(|d| d.armed) {
+            return;
+        }
         let Some(ask) = self.delete.take() else {
             return;
         };
@@ -333,6 +345,17 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     views::overwrite_dialog::build(s, &k, &mut layer);
     views::mfa_dialog::build(s, &k, &mut layer);
     root(main, layer)
+}
+
+/// The result of the start task. A task that panics or is cancelled gives an error.
+async fn start_result(
+    task: tokio::task::JoinHandle<leapp_core::Result<()>>,
+) -> leapp_core::Result<()> {
+    task.await.unwrap_or_else(|_| {
+        Err(leapp_core::Error::Io(std::io::Error::other(
+            "the start stopped unexpectedly; try again",
+        )))
+    })
 }
 
 /// Reads all bridge messages. True if the state changed.
@@ -389,6 +412,19 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             changed = true;
         } else {
             // A `poll` must run when the delay ends, even if nothing else wakes the UI.
+            tx.wake_after(Duration::from_secs_f64(left));
+        }
+    }
+    if let Some(ask) = s.delete.as_mut().filter(|d| !d.armed) {
+        let since = *ask.since.get_or_insert_with(|| {
+            changed = true;
+            t
+        });
+        let left = CONFIRM_ARM_SECONDS - (t - since);
+        if left <= 0.0 {
+            ask.armed = true;
+            changed = true;
+        } else {
             tx.wake_after(Duration::from_secs_f64(left));
         }
     }
@@ -489,5 +525,22 @@ pub fn spec() -> AppSpec<Ui> {
         scenes: SCENES,
         min_size: Some((views::main_window::MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)),
         ..AppSpec::new("Leapp RS", (1100.0, 700.0), init, view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_start_gives_an_error() {
+        let task = tokio::spawn(async { panic!("the core call panics") });
+        let err = start_result(task).await.expect_err("an error");
+        assert_eq!(err.to_string(), "the start stopped unexpectedly; try again");
+    }
+
+    #[tokio::test]
+    async fn a_finished_start_keeps_its_result() {
+        assert!(start_result(tokio::spawn(async { Ok(()) })).await.is_ok());
     }
 }

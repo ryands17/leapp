@@ -12,6 +12,7 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     let Some(ask) = s.delete_ask() else {
         return;
     };
+    let disabled = !ask.armed;
     // The first child holds the question: the tests read it as the text of the dialog.
     let body = col()
         .key("dlg-delete")
@@ -33,6 +34,7 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .child(
                     Button::new("Cancel")
                         .variant(ButtonVariant::Ghost)
+                        .disabled(disabled)
                         .on_press(|s: &mut Ui| s.answer_delete(false))
                         .build(k)
                         .key("btn-delete-no"),
@@ -40,6 +42,7 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .child(
                     Button::new("Delete")
                         .variant(ButtonVariant::Danger)
+                        .disabled(disabled)
                         .on_press(|s: &mut Ui| s.answer_delete(true))
                         .build(k)
                         .key("btn-delete-yes"),
