@@ -42,6 +42,9 @@ All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
 - Done (`9f5fbe2f`, test `the_dialog_fits_the_smallest_window`): the Create dialog at 1032x480.
 - Done (Task 9, test file `crates/leapp-app/tests/refresh.rs`): the app refresh loop
   (`spawn_refresh_loop`, `REFRESH_TICK`).
+- Done (final-review fix wave, tests `a_start_that_panics_leaves_the_session_inactive` and
+  `the_loop_runs_again_after_a_tick_panics`): a panic in a start or a refresh no longer leaves the
+  session `Pending` (`PendingGuard`).
 - Moved to "Small items": the region search test assumes that "eu-w" matches only `eu-west-*`.
 - Moved to "Small items": the region option list is rebuilt on each frame while the dialog is open.
 
@@ -64,6 +67,8 @@ All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
   cleanup per profile, and show the error before quit.
 - `Error::Io` has no path, so the toast can omit the file name.
 - AWS error text in the toast can be long and technical.
+- One MFA question blocks the whole refresh tick: the other due sessions are not refreshed until
+  the user answers. For F8 or F3: refresh the MFA sessions last, or give the question a timeout.
 
 ## F9 (packaging, hardening)
 
@@ -87,9 +92,8 @@ All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
 - `fake-aws` does not escape XML in error messages.
 - The region search test assumes that "eu-w" matches only `eu-west-*` (rune-kit fuzzy match).
 - The region option list is rebuilt on each frame while the dialog is open (about 30 items).
-- A panic inside a refresh (after `refresh_session` sets `Pending`) leaves the session `Pending`.
-  The app loop survives the panic (test `the_loop_runs_again_after_a_tick_panics`), but no later
-  tick refreshes or frees that session until the next start of the app.
+- A stop that a refresh refuses (the refresh holds the session `Pending`) says "Another session
+  with the same named profile is starting". It should say that the session is being refreshed.
 
 ## Decisions made without the owner (rulings)
 

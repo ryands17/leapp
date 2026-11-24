@@ -52,7 +52,8 @@ Run all commands in `leapp-rs/`.
   a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
-- F1 keys: `row-menu-<id>` (the `⋯` button of a row), `menu-<id>` (its menu), `dlg-mfa`,
+- F1 keys: `row-menu-<id>` (the `⋯` button of a row), `menu-<id>` (the `Menu` key of its menu: the
+  frame element is `menu-<id>-menu`, the items are `menu-<id>-item<i>`), `dlg-mfa`,
   `fld-mfa-code`, `btn-mfa-submit`, `btn-mfa-cancel`, `dlg-delete`, `btn-delete-yes`,
   `btn-delete-no`, `btn-secret-eye`, `fld-mfa-device`, `err-mfa-device`, `btn-empty-add-session`.
 - Menu item keys hold an index, not a name. Tests pick an item by its label:
