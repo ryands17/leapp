@@ -367,8 +367,10 @@ fn one_session(s: &mut Ui) {
 /// three). Cleans up the managed profiles, then quits. The UI thread waits for the cleanup: it is
 /// local file and keychain work.
 pub fn on_close(s: &mut Ui, tx: &mut Tx) {
-    // Drop the open questions: their tasks get no (overwrite) or cancel (MFA) and end, so no
-    // start waits for a dialog that is gone.
+    // Drop the open questions, and the ones still in the bridge: their tasks get no (overwrite)
+    // or cancel (MFA) and end, so no start waits for a dialog that is gone. A `Refreshed` or
+    // `Failed` message in the bridge is lost too: the app quits now.
+    drop(s.bridge.drain());
     s.questions.clear();
     s.question_since = None;
     s.question_armed = false;

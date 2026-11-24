@@ -89,8 +89,9 @@ fn a_short_or_spaced_code_cannot_be_submitted() {
     for bad in ["12345", "1 2345", "1234567", "12345a"] {
         h.type_text(bad);
         assert!(h.is_disabled("btn-mfa-submit"), "{bad:?} disables Submit");
-        h.tap("btn-mfa-submit");
+        // Enter first: the field still has the focus. A tap on the disabled Submit takes it.
         h.press(Key::Enter);
+        h.tap("btn-mfa-submit");
         h.frames(5);
         assert!(h.has("dlg-mfa"), "{bad:?} keeps the dialog open");
         assert_eq!(h.fake.count("GetSessionToken"), 0, "{bad:?} sends nothing");
@@ -227,4 +228,38 @@ fn closing_the_window_with_the_mfa_dialog_open_quits() {
     assert!(result.is_err(), "the start ends with an error");
     assert!(!credentials(&h).contains("[default]"));
     assert_eq!(h.fake.count("GetSessionToken"), 0);
+}
+
+#[test]
+fn closing_the_window_drops_a_question_that_the_ui_has_not_read() {
+    let (mut h, _) = AppHarness::with_setup(|_| ());
+    // The questions go into the bridge. No frame runs, so `poll` does not read them.
+    let (mfa_reply, mut mfa_answer) = tokio::sync::oneshot::channel();
+    h.bridge.send(leapp_app::Msg::AskMfa {
+        session: "dev".into(),
+        reply: mfa_reply,
+    });
+    let (yes_reply, mut yes_answer) = tokio::sync::oneshot::channel();
+    h.bridge.send(leapp_app::Msg::ConfirmOverwrite {
+        profile: "default".into(),
+        reply: yes_reply,
+    });
+    assert_eq!(h.rt.state.pending_question_count(), 0);
+
+    h.rt.update(leapp_app::on_close);
+
+    assert!(
+        matches!(
+            mfa_answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ),
+        "the MFA question is dropped"
+    );
+    assert!(
+        matches!(
+            yes_answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ),
+        "the overwrite question is dropped"
+    );
 }
