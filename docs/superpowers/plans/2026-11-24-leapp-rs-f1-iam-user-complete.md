@@ -31,9 +31,12 @@ Every core call from the UI runs off the render thread (`Ui::run`).
   with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Tests never touch the real home folder, the real keychain or real AWS: `tempfile::TempDir` home,
   `MemoryStore`, `fake-aws`.
-- Secrets (access keys, secret keys, session tokens, MFA codes, the user's backed-up section) never
+- Secrets (secret access keys, session tokens, MFA codes, the user's backed-up section) never
   go in `workspace.json`, logs, `Debug` output, error text or the element tree. Request types that
   hold a secret have a hand-written `Debug` that prints `<redacted>`.
+- The access key ID is an identifier, not a secret (owner ruling 2026-11-24): it may show in the
+  UI and the element tree. It still never goes in `workspace.json`, logs, `Debug` output or error
+  text, and it is stored only in the `SecretStore`.
 - `leapp-core` must not depend on Rune.
 - Element keys are the test contract. Keep the F0 keys (`row-<id>`, `status-<id>`, `cell-*-<id>`,
   `btn-create`, `btn-create-submit`, `btn-create-cancel`, `fld-*`, `err-*`, `sel-region*`,
