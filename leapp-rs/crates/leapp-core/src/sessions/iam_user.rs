@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::Leapp;
 use crate::aws_files::SectionBody;
 use crate::error::{Error, Result};
-use crate::model::Session;
+use crate::model::{Session, SessionKind};
 use crate::regions::DEFAULT_REGION;
 
 const TOKEN_DURATION_SECONDS: i32 = 36000;
@@ -54,6 +54,25 @@ impl Leapp {
             .get(&format!("iam-user-{}-secret-access-key", session.id))?
             .ok_or_else(|| Error::Secret("secret access key of the session is missing".into()))?;
 
+        let mfa = match &session.kind {
+            SessionKind::IamUser { mfa_device, .. } => mfa_device.clone(),
+        };
+        // No lock is held here: the prompter may wait for the user.
+        let token_code = match mfa {
+            Some(serial) => {
+                let code = self
+                    .config
+                    .prompter
+                    .ask_mfa_code(&session.name)
+                    .await
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .ok_or(Error::MfaCancelled)?;
+                Some((serial, code))
+            }
+            None => None,
+        };
+
         let mut config = aws_sdk_sts::Config::builder()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new(region.clone()))
@@ -77,12 +96,13 @@ impl Leapp {
         if self.state.lock().unwrap().closing {
             return Err(Error::Closing);
         }
-        let output = aws_sdk_sts::Client::from_conf(config.build())
+        let mut call = aws_sdk_sts::Client::from_conf(config.build())
             .get_session_token()
-            .duration_seconds(TOKEN_DURATION_SECONDS)
-            .send()
-            .await
-            .map_err(|e| Error::Aws(aws_message(&e)))?;
+            .duration_seconds(TOKEN_DURATION_SECONDS);
+        if let Some((serial, code)) = token_code {
+            call = call.serial_number(serial).token_code(code);
+        }
+        let output = call.send().await.map_err(|e| Error::Aws(aws_message(&e)))?;
 
         let credentials = output
             .credentials()

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::aws_files::CredentialsFile;
-use crate::error::{Error, Result};
+use crate::error::{Error, Field, Result};
 use crate::model::{ManagedProfile, SessionId, SessionKind, SessionStatus, Workspace};
 use crate::secrets::SecretStore;
 use crate::store;
@@ -534,7 +534,7 @@ fn profile_name(ws: &Workspace, profile_id: Uuid) -> Result<String> {
     ws.profile_name(profile_id)
         .map(str::to_string)
         .ok_or_else(|| Error::InvalidInput {
-            field: "profile",
+            field: Field::Profile,
             message: "the profile of the session does not exist".into(),
         })
 }

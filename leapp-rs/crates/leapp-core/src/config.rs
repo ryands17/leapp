@@ -27,6 +27,9 @@ impl Clock for SystemClock {
 #[async_trait]
 pub trait Prompter: Send + Sync {
     async fn confirm_profile_overwrite(&self, profile: &str) -> bool;
+
+    /// The one-time MFA code for the session. `None` means the user cancelled.
+    async fn ask_mfa_code(&self, session_name: &str) -> Option<String>;
 }
 
 pub struct Config {

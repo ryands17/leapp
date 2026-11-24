@@ -93,4 +93,9 @@ impl Prompter for UiPrompter {
         });
         answer.await.unwrap_or(false)
     }
+
+    /// Task 6 adds the dialog. Until then no code is given, which counts as a cancel.
+    async fn ask_mfa_code(&self, _session_name: &str) -> Option<String> {
+        None
+    }
 }

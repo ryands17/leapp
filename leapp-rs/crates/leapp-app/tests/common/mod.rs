@@ -193,5 +193,6 @@ pub fn iam_user(name: &str, profile: &str) -> NewIamUser {
         secret_access_key: format!("SECRET-{name}"),
         profile_name: profile.to_string(),
         region: "eu-west-1".to_string(),
+        mfa_device: None,
     }
 }

@@ -252,6 +252,7 @@ fn one_session(s: &mut Ui) {
         secret_access_key: "example-secret".into(),
         profile_name: "default".into(),
         region: "us-east-1".into(),
+        mfa_device: None,
     });
     if let Err(e) = created {
         s.show_error(e.to_string());

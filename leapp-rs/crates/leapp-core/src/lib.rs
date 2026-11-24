@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 pub use config::{Clock, Config, Endpoints, Prompter, SystemClock};
-pub use error::{Error, Result};
+pub use error::{Error, Field, Result};
 pub use model::{
     ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind, SessionStatus,
     Workspace,
@@ -63,22 +63,29 @@ impl Leapp {
     }
 
     pub fn create_iam_user(&self, req: NewIamUser) -> Result<SessionId> {
-        let name = required("name", &req.name)?;
-        let access_key_id = required("access_key_id", &req.access_key_id)?;
-        let secret_access_key = required("secret_access_key", &req.secret_access_key)?;
-        let profile = required("profile", &req.profile_name)?;
+        let name = required(Field::Name, &req.name)?;
+        let access_key_id = required(Field::AccessKeyId, &req.access_key_id)?;
+        let secret_access_key = required(Field::SecretAccessKey, &req.secret_access_key)?;
+        let profile = required(Field::Profile, &req.profile_name)?;
         if profile.contains(['[', ']', '\n', '\r']) {
             return Err(Error::InvalidInput {
-                field: "profile",
+                field: Field::Profile,
                 message: "must not contain [, ], or line breaks".into(),
             });
         }
         if !regions::REGIONS.contains(&req.region.as_str()) {
             return Err(Error::InvalidInput {
-                field: "region",
+                field: Field::Region,
                 message: format!("unknown region \"{}\"", req.region),
             });
         }
+
+        let mfa_device = req
+            .mfa_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string);
 
         let id = Uuid::new_v4();
         let secrets = &self.config.secrets;
@@ -111,7 +118,7 @@ impl Leapp {
                 start_time: None,
                 session_token_expiration: None,
                 kind: SessionKind::IamUser {
-                    mfa_device: None,
+                    mfa_device,
                     account: None,
                 },
             });
@@ -128,7 +135,7 @@ impl Leapp {
     }
 }
 
-fn required<'a>(field: &'static str, value: &'a str) -> Result<&'a str> {
+fn required(field: Field, value: &str) -> Result<&str> {
     let value = value.trim();
     if value.is_empty() {
         return Err(Error::InvalidInput {

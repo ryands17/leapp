@@ -14,6 +14,8 @@ use tempfile::TempDir;
 pub struct ScriptedPrompter {
     answer: AtomicBool,
     asked: Mutex<Vec<String>>,
+    mfa_answers: Mutex<std::collections::VecDeque<Option<String>>>,
+    mfa_asked: Mutex<Vec<String>>,
 }
 
 impl ScriptedPrompter {
@@ -24,6 +26,17 @@ impl ScriptedPrompter {
     pub fn asked(&self) -> Vec<String> {
         self.asked.lock().unwrap().clone()
     }
+
+    /// Queues the answers to the next MFA questions. `None` is a cancel. An empty queue cancels.
+    pub fn mfa_answers(&self, answers: Vec<Option<&str>>) {
+        let mut queue = self.mfa_answers.lock().unwrap();
+        queue.extend(answers.into_iter().map(|a| a.map(str::to_string)));
+    }
+
+    /// The session names of the MFA questions so far.
+    pub fn mfa_asked(&self) -> Vec<String> {
+        self.mfa_asked.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -31,6 +44,14 @@ impl Prompter for ScriptedPrompter {
     async fn confirm_profile_overwrite(&self, profile: &str) -> bool {
         self.asked.lock().unwrap().push(profile.to_string());
         self.answer.load(Ordering::SeqCst)
+    }
+
+    async fn ask_mfa_code(&self, session_name: &str) -> Option<String> {
+        self.mfa_asked
+            .lock()
+            .unwrap()
+            .push(session_name.to_string());
+        self.mfa_answers.lock().unwrap().pop_front().flatten()
     }
 }
 
@@ -190,6 +211,8 @@ impl Harness {
         let prompter = Arc::new(ScriptedPrompter {
             answer: AtomicBool::new(true),
             asked: Mutex::new(Vec::new()),
+            mfa_answers: Mutex::new(Default::default()),
+            mfa_asked: Mutex::new(Vec::new()),
         });
         let mut config = Self::config(&home, &store, &prompter, &fake);
         if let Some(clock) = clock(home.path()) {
@@ -268,6 +291,7 @@ impl Harness {
             secret_access_key: format!("SECRET-{name}"),
             profile_name: profile.to_string(),
             region: "eu-west-1".to_string(),
+            mfa_device: None,
         }
     }
 }

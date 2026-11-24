@@ -98,6 +98,8 @@ pub struct NewIamUser {
     pub secret_access_key: String,
     pub profile_name: String,
     pub region: String,
+    /// Serial number or ARN of the MFA device. Empty after trim means no MFA.
+    pub mfa_device: Option<String>,
 }
 
 impl std::fmt::Debug for NewIamUser {
@@ -108,6 +110,7 @@ impl std::fmt::Debug for NewIamUser {
             .field("secret_access_key", &"<redacted>")
             .field("profile_name", &self.profile_name)
             .field("region", &self.region)
+            .field("mfa_device", &self.mfa_device)
             .finish()
     }
 }

@@ -1,7 +1,7 @@
 //! The Create IAM User dialog (spec 14.5, IAM User part, without MFA).
 
 use leapp_core::regions::{DEFAULT_REGION, REGIONS};
-use leapp_core::{Error, NewIamUser};
+use leapp_core::{Error, Field, NewIamUser};
 use rune::{El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{
     Button, ButtonVariant, Combobox, ComboboxEvent, ComboboxOption, ComboboxState, Dialog, Kit,
@@ -45,14 +45,15 @@ struct FieldErrors {
 
 impl FieldErrors {
     /// Puts `message` under the field that core named. An unknown name goes to the form.
-    fn set(&mut self, field: &str, message: String) {
+    fn set(&mut self, field: Field, message: String) {
         let slot = match field {
-            "name" => &mut self.name,
-            "access_key_id" => &mut self.access_key,
-            "secret_access_key" => &mut self.secret_key,
-            "profile" => &mut self.profile,
-            "region" => &mut self.region,
-            _ => &mut self.form,
+            Field::Name => &mut self.name,
+            Field::AccessKeyId => &mut self.access_key,
+            Field::SecretAccessKey => &mut self.secret_key,
+            Field::Profile => &mut self.profile,
+            Field::Region => &mut self.region,
+            // Task 7 adds the MFA device field.
+            Field::MfaDevice => &mut self.form,
         };
         *slot = Some(message);
     }
@@ -109,6 +110,7 @@ impl CreateForm {
             secret_access_key: self.secret_access_key.text.clone(),
             profile_name: self.profile.text.clone(),
             region: self.region.clone(),
+            mfa_device: None,
         }
     }
 }
@@ -128,7 +130,7 @@ fn submit(s: &mut Ui, _tx: &mut Tx) {
 fn errors_from(e: &Error) -> FieldErrors {
     let mut errors = FieldErrors::default();
     match e {
-        Error::InvalidInput { field, message } => errors.set(field, message.clone()),
+        Error::InvalidInput { field, message } => errors.set(*field, message.clone()),
         other => errors.form = Some(other.to_string()),
     }
     errors

@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Field, Result};
 
 /// The four keys of a section that Leapp RS writes.
 pub(crate) struct SectionBody {
@@ -62,10 +62,9 @@ impl CredentialsFile {
             &body.region,
         ] {
             if value.contains(['\r', '\n']) {
-                return Err(Error::InvalidInput {
-                    field: "credentials",
-                    message: "a value contains a line break".into(),
-                });
+                return Err(Error::Aws(
+                    "a credentials value contains a line break".into(),
+                ));
             }
         }
         let text = self.read()?;
@@ -125,7 +124,7 @@ impl CredentialsFile {
 fn check_profile(profile: &str) -> Result<()> {
     if profile.trim().is_empty() || profile.contains(['[', ']', '\r', '\n']) {
         return Err(Error::InvalidInput {
-            field: "profile",
+            field: Field::Profile,
             message: "must not be empty or contain [, ], or line breaks".into(),
         });
     }
