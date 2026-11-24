@@ -23,6 +23,12 @@ pub enum Error {
          ~/.aws/credentials or delete the keychain item, then try again."
     )]
     BackupConflict(String),
+    #[error(
+        "the saved copy of profile \"{0}\" is missing from the keychain item \
+         \"aws-profile-backup-{0}\" (service leapp-rs). Leapp RS removed its own keys from the \
+         profile, but could not put your keys back."
+    )]
+    BackupMissing(String),
     #[error("Leapp RS is closing, so the session did not start")]
     Closing,
     #[error("workspace file version {0} is newer than this app supports")]

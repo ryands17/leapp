@@ -11,7 +11,6 @@ mod store;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 
 use uuid::Uuid;
 
@@ -26,11 +25,16 @@ pub use secrets::{KeychainStore, MemoryStore, SecretStore};
 pub struct Leapp {
     config: Config,
     workspace_path: PathBuf,
-    workspace: Mutex<Workspace>,
-    /// Set by `shutdown`. After it is set, no start writes the credentials file, the workspace
-    /// or a backup. Read and written only while the `workspace` lock is held, so a start sees
-    /// it before its write-ahead save or not at all.
-    closing: AtomicBool,
+    state: Mutex<State>,
+}
+
+/// Everything that changes after `open`, under one lock.
+struct State {
+    ws: Workspace,
+    /// Set by `shutdown`. After it is set, no start calls AWS or writes the credentials file,
+    /// the workspace or a backup. It is in the same lock as `ws`, so a start sees it before its
+    /// write-ahead save or not at all.
+    closing: bool,
 }
 
 impl Leapp {
@@ -40,14 +44,16 @@ impl Leapp {
         Ok(Leapp {
             config,
             workspace_path,
-            workspace: Mutex::new(workspace),
-            closing: AtomicBool::new(false),
+            state: Mutex::new(State {
+                ws: workspace,
+                closing: false,
+            }),
         })
     }
 
     /// A copy of the current workspace.
     pub fn workspace(&self) -> Workspace {
-        self.workspace.lock().unwrap().clone()
+        self.state.lock().unwrap().ws.clone()
     }
 
     pub fn create_iam_user(&self, req: NewIamUser) -> Result<SessionId> {
@@ -76,8 +82,8 @@ impl Leapp {
             secrets.set(&key_id_key, access_key_id)?;
             secrets.set(&secret_key, secret_access_key)?;
 
-            let mut ws = self.workspace.lock().unwrap();
-            let mut next = ws.clone();
+            let mut state = self.state.lock().unwrap();
+            let mut next = state.ws.clone();
             let profile_id = match next.profiles.iter().find(|p| p.name == profile) {
                 Some(p) => p.id,
                 None => {
@@ -104,7 +110,7 @@ impl Leapp {
                 },
             });
             store::save(&self.workspace_path, &next)?;
-            *ws = next;
+            state.ws = next;
             Ok(())
         })();
         if let Err(e) = result {

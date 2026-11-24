@@ -2,16 +2,14 @@
 
 mod iam_user;
 
-use std::sync::atomic::Ordering;
-
 use uuid::Uuid;
 
-use crate::Leapp;
 use crate::aws_files::CredentialsFile;
 use crate::error::{Error, Result};
 use crate::model::{ManagedProfile, SessionId, SessionKind, SessionStatus, Workspace};
 use crate::secrets::SecretStore;
 use crate::store;
+use crate::{Leapp, State};
 
 impl Leapp {
     /// Starts a session: stops other sessions on the same profile, gets credentials, writes the
@@ -23,13 +21,14 @@ impl Leapp {
     /// thread).
     pub async fn start(&self, id: SessionId) -> Result<()> {
         let (profile_id, profile, to_stop, consent_carried) = {
-            let ws = self.workspace.lock().unwrap();
-            if self.closing.load(Ordering::SeqCst) {
+            let state = self.state.lock().unwrap();
+            if state.closing {
                 return Err(Error::Closing);
             }
+            let ws = &state.ws;
             let session = ws.session(id).ok_or(Error::NotFound(id))?;
-            let profile = profile_name(&ws, session.profile_id)?;
-            if pending_on(&ws, session.profile_id) {
+            let profile = profile_name(ws, session.profile_id)?;
+            if pending_on(ws, session.profile_id) {
                 return Err(pending_error());
             }
             let to_stop: Vec<SessionId> = ws
@@ -50,20 +49,20 @@ impl Leapp {
             self.stop(other).await?;
         }
         {
-            let mut ws = self.workspace.lock().unwrap();
-            if self.closing.load(Ordering::SeqCst) {
+            let mut state = self.state.lock().unwrap();
+            if state.closing {
                 return Err(Error::Closing);
             }
-            if pending_on(&ws, profile_id) {
+            if pending_on(&state.ws, profile_id) {
                 return Err(pending_error());
             }
-            set_status(&mut ws, id, SessionStatus::Pending);
+            set_status(&mut state.ws, id, SessionStatus::Pending);
         }
 
         let result = self.activate(id, &profile, consent_carried).await;
         if result.is_err() {
-            let mut ws = self.workspace.lock().unwrap();
-            set_status(&mut ws, id, SessionStatus::Inactive);
+            let mut state = self.state.lock().unwrap();
+            set_status(&mut state.ws, id, SessionStatus::Inactive);
         }
         result
     }
@@ -71,38 +70,77 @@ impl Leapp {
     /// Stops a session: puts its profile section back as it was (the user's saved section, or
     /// none). Does nothing if it is `Inactive`. A `Pending` session cannot be stopped.
     ///
-    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
-    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
-    /// thread).
+    /// The keychain read of the backup runs without the workspace lock. If the managed entry
+    /// changed meanwhile, the stop starts again from the top one time; after a second change it
+    /// reads the backup under the lock. If the profile had a user section but its backup is
+    /// missing, the stop removes our section, completes, and returns `Error::BackupMissing`.
+    ///
+    /// This function does blocking file and keychain I/O. Call it from a task that may block (the
+    /// UI calls it from its tokio bridge, not the render thread).
     pub async fn stop(&self, id: SessionId) -> Result<()> {
-        let mut ws = self.workspace.lock().unwrap();
-        let session = ws.session(id).ok_or(Error::NotFound(id))?;
-        match session.status {
-            SessionStatus::Inactive => return Ok(()),
-            SessionStatus::Pending => return Err(pending_error()),
-            SessionStatus::Active => {}
-        }
-        let profile = profile_name(&ws, session.profile_id)?;
-        let file = CredentialsFile::new(&self.config.home_dir);
+        let mut retried = false;
+        loop {
+            let seen = stop_target(&self.state.lock().unwrap(), id)?;
+            let Some((profile, entry)) = seen else {
+                return Ok(());
+            };
+            let backup = self.read_backup(&profile, entry.as_ref(), id)?;
 
-        let mut next = ws.clone();
-        let released = self.release_profile(&mut next, &file, &profile, id)?;
-        set_inactive(&mut next, id);
-        if let Err(e) = store::save(&self.workspace_path, &next) {
-            released.rollback(&file);
-            return Err(e);
+            let mut state = self.state.lock().unwrap();
+            let Some((now_profile, now_entry)) = stop_target(&state, id)? else {
+                return Ok(());
+            };
+            let backup = if now_profile == profile && now_entry == entry {
+                backup
+            } else if !retried {
+                retried = true;
+                continue;
+            } else {
+                // Rare: the entry changed two times. Read the backup under the lock this time.
+                self.read_backup(&now_profile, now_entry.as_ref(), id)?
+            };
+            let profile = now_profile;
+
+            let file = CredentialsFile::new(&self.config.home_dir);
+            let mut next = state.ws.clone();
+            let released = release_profile(&mut next, &file, &profile, id, backup)?;
+            set_inactive(&mut next, id);
+            if let Err(e) = store::save(&self.workspace_path, &next) {
+                released.rollback(&file);
+                return Err(e);
+            }
+            state.ws = next;
+            drop(state);
+            released.finish(self.config.secrets.as_ref());
+            return if released.backup_missing {
+                Err(Error::BackupMissing(profile))
+            } else {
+                Ok(())
+            };
         }
-        *ws = next;
-        released.finish(self.config.secrets.as_ref());
-        Ok(())
+    }
+
+    /// The backup of the user's section of `profile`, if `owner` manages the profile and the
+    /// profile had a user section. Call it without the workspace lock: it reads the keychain.
+    fn read_backup(
+        &self,
+        profile: &str,
+        entry: Option<&ManagedProfile>,
+        owner: SessionId,
+    ) -> Result<Option<String>> {
+        match entry {
+            Some(m) if m.session_id == owner && m.had_original => {
+                self.config.secrets.get(&backup_key(profile))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Cleans up after a crash: every managed profile is restored or removed, every session is
     /// set to `Inactive`.
     ///
-    /// This function does blocking file and keychain I/O while it holds the workspace lock. Call
-    /// it from a task that may block (the UI calls it from its tokio bridge, not the render
-    /// thread).
+    /// This function does blocking file and keychain I/O. Call it from a task that may block (the
+    /// UI calls it from its tokio bridge, not the render thread).
     pub async fn startup(&self) -> Result<()> {
         self.clean_all(false)
     }
@@ -111,8 +149,7 @@ impl Leapp {
     /// flight (for example one that waits on AWS) fails with `Error::Closing` before it writes,
     /// and later starts fail the same way.
     ///
-    /// This function does blocking file and keychain I/O while it holds the workspace lock. The
-    /// UI calls it on the render thread, with `block_on` in `on_close`, because the window must
+    /// This function does blocking file and keychain I/O. The UI calls it on the render thread, with `block_on` in `on_close`, because the window must
     /// not close before the cleanup ends. That is acceptable: the work is local (the credentials
     /// file, `workspace.json` and the keychain), with no network call. A keychain prompt can
     /// keep the window open until the user answers it.
@@ -122,21 +159,38 @@ impl Leapp {
 
     /// With `closing`, sets the closing flag under the lock first, so no start can write after
     /// the cleanup.
+    ///
+    /// The backups are read without the lock. A managed entry that changed meanwhile is skipped;
+    /// the next `startup` cleans it. If a backup is missing, the cleanup completes and then
+    /// returns `Error::BackupMissing` for the first such profile.
     fn clean_all(&self, closing: bool) -> Result<()> {
-        let mut ws = self.workspace.lock().unwrap();
-        if closing {
-            self.closing.store(true, Ordering::SeqCst);
+        let seen: Vec<(String, ManagedProfile)> = {
+            let mut state = self.state.lock().unwrap();
+            if closing {
+                state.closing = true;
+            }
+            state
+                .ws
+                .managed_profiles
+                .iter()
+                .map(|(profile, m)| (profile.clone(), m.clone()))
+                .collect()
+        };
+        let mut backups = Vec::with_capacity(seen.len());
+        for (profile, entry) in seen {
+            let backup = self.read_backup(&profile, Some(&entry), entry.session_id)?;
+            backups.push((profile, entry, backup));
         }
+
+        let mut state = self.state.lock().unwrap();
         let file = CredentialsFile::new(&self.config.home_dir);
-        let mut next = ws.clone();
-        let managed: Vec<(String, SessionId)> = next
-            .managed_profiles
-            .iter()
-            .map(|(profile, m)| (profile.clone(), m.session_id))
-            .collect();
+        let mut next = state.ws.clone();
         let mut released = Vec::new();
-        for (profile, owner) in managed {
-            match self.release_profile(&mut next, &file, &profile, owner) {
+        for (profile, entry, backup) in backups {
+            if next.managed_profiles.get(&profile) != Some(&entry) {
+                continue;
+            }
+            match release_profile(&mut next, &file, &profile, entry.session_id, backup) {
                 Ok(r) => released.push(r),
                 Err(e) => {
                     rollback_all(&file, &released);
@@ -152,52 +206,15 @@ impl Leapp {
             rollback_all(&file, &released);
             return Err(e);
         }
-        *ws = next;
+        state.ws = next;
+        drop(state);
         for r in &released {
             r.finish(self.config.secrets.as_ref());
         }
-        Ok(())
-    }
-
-    /// Spec 9.3 step 6 for one profile: if `owner` manages it, put the user's saved section back
-    /// (or remove ours) and drop the entry from `next`. The secret backup is not deleted here;
-    /// `Released::finish` does that after the workspace is saved.
-    fn release_profile(
-        &self,
-        next: &mut Workspace,
-        file: &CredentialsFile,
-        profile: &str,
-        owner: SessionId,
-    ) -> Result<Released> {
-        let mut released = Released {
-            profile: profile.to_string(),
-            previous_section: None,
-            backup_key: None,
-            changed: false,
-        };
-        let Some(managed) = next.managed_profiles.get(profile) else {
-            return Ok(released);
-        };
-        if managed.session_id != owner {
-            return Ok(released);
+        match released.into_iter().find(|r| r.backup_missing) {
+            Some(r) => Err(Error::BackupMissing(r.profile)),
+            None => Ok(()),
         }
-        let had_original = managed.had_original;
-        released.previous_section = file.section_text(profile)?;
-        let backup = if had_original {
-            let key = backup_key(profile);
-            let saved = self.config.secrets.get(&key)?;
-            released.backup_key = Some(key);
-            saved
-        } else {
-            None
-        };
-        match backup {
-            Some(text) => file.write_raw_section(profile, &text)?,
-            None => file.remove_section(profile)?,
-        }
-        released.changed = true;
-        next.managed_profiles.remove(profile);
-        Ok(released)
     }
 
     /// Steps 3 to 7 of spec 10.1 and 9.3. Changes the file and the workspace together or not at
@@ -209,10 +226,10 @@ impl Leapp {
     /// put back is saved again as the backup.
     async fn activate(&self, id: SessionId, profile: &str, consent_carried: bool) -> Result<()> {
         let (session, existing) = {
-            let ws = self.workspace.lock().unwrap();
+            let state = self.state.lock().unwrap();
             (
-                ws.session(id).ok_or(Error::NotFound(id))?.clone(),
-                ws.managed_profiles.get(profile).cloned(),
+                state.ws.session(id).ok_or(Error::NotFound(id))?.clone(),
+                state.ws.managed_profiles.get(profile).cloned(),
             )
         };
         let file = CredentialsFile::new(&self.config.home_dir);
@@ -242,6 +259,10 @@ impl Leapp {
                             .await
                     {
                         return Err(Error::ProfileOverwriteDeclined(profile.to_string()));
+                    }
+                    // After `shutdown` began, no new backup.
+                    if self.state.lock().unwrap().closing {
+                        return Err(Error::Closing);
                     }
                     if let Some(text) = file.section_text(profile)? {
                         secrets.set(&key, &text)?;
@@ -290,10 +311,10 @@ impl Leapp {
                 .map_err(|e| (e, BackupFate::Delete))?,
         };
 
-        let mut ws = self.workspace.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         // `shutdown` cleaned up while we waited. Nothing is written yet, so the new backup (if
         // any) is a copy of the section that is still in the file and may go.
-        if self.closing.load(Ordering::SeqCst) {
+        if state.closing {
             return Err((Error::Closing, BackupFate::Delete));
         }
         let previous_section = file
@@ -302,7 +323,7 @@ impl Leapp {
 
         // Save the entry first. In memory the session stays `Pending`; on disk it is `Inactive`,
         // so that a crash leaves no `Pending` status.
-        let mut ahead = ws.clone();
+        let mut ahead = state.ws.clone();
         ahead.managed_profiles.insert(
             profile.to_string(),
             ManagedProfile {
@@ -311,14 +332,14 @@ impl Leapp {
             },
         );
         store::save(&self.workspace_path, &ahead).map_err(|e| (e, BackupFate::Delete))?;
-        *ws = ahead;
+        state.ws = ahead;
 
         if let Err(e) = file.write_section(profile, &body) {
-            let fate = self.drop_entry(&mut ws, profile, managed_already);
+            let fate = self.drop_entry(&mut state.ws, profile, managed_already);
             return Err((e, fate));
         }
 
-        let mut next = ws.clone();
+        let mut next = state.ws.clone();
         if let Some(s) = next.sessions.iter_mut().find(|s| s.id == id) {
             s.status = SessionStatus::Active;
             s.start_time = Some(self.config.clock.now());
@@ -326,14 +347,14 @@ impl Leapp {
         }
         if let Err(e) = store::save(&self.workspace_path, &next) {
             let fate = match restore(file, profile, previous_section.as_deref()) {
-                Ok(()) => self.drop_entry(&mut ws, profile, managed_already),
+                Ok(()) => self.drop_entry(&mut state.ws, profile, managed_already),
                 // The file still holds our section. Keep the backup and the entry, so that
                 // `startup` can try again. The error of the save is returned.
                 Err(_) => BackupFate::Keep,
             };
             return Err((e, fate));
         }
-        *ws = next;
+        state.ws = next;
         Ok(())
     }
 
@@ -369,6 +390,8 @@ struct Released {
     previous_section: Option<String>,
     backup_key: Option<String>,
     changed: bool,
+    /// The profile had a user section, but its backup was not in the keychain.
+    backup_missing: bool,
 }
 
 impl Released {
@@ -388,6 +411,62 @@ impl Released {
             let _ = secrets.delete(key);
         }
     }
+}
+
+/// The profile of an `Active` session and its managed entry. `None` if the session is `Inactive`.
+fn stop_target(state: &State, id: SessionId) -> Result<Option<(String, Option<ManagedProfile>)>> {
+    let session = state.ws.session(id).ok_or(Error::NotFound(id))?;
+    match session.status {
+        SessionStatus::Inactive => return Ok(None),
+        SessionStatus::Pending => return Err(pending_error()),
+        SessionStatus::Active => {}
+    }
+    let profile = profile_name(&state.ws, session.profile_id)?;
+    let entry = state.ws.managed_profiles.get(&profile).cloned();
+    Ok(Some((profile, entry)))
+}
+
+/// Spec 9.3 step 6 for one profile: if `owner` manages it, put the user's saved section back
+/// (or remove ours) and drop the entry from `next`. `backup` is the saved section that the caller
+/// read from the keychain before it took the lock. If the profile had a user section and
+/// `backup` is `None`, our section is removed and the result records the missing backup. The
+/// secret backup is not deleted here; `Released::finish` does that after the workspace is saved.
+fn release_profile(
+    next: &mut Workspace,
+    file: &CredentialsFile,
+    profile: &str,
+    owner: SessionId,
+    backup: Option<String>,
+) -> Result<Released> {
+    let mut released = Released {
+        profile: profile.to_string(),
+        previous_section: None,
+        backup_key: None,
+        changed: false,
+        backup_missing: false,
+    };
+    let Some(managed) = next.managed_profiles.get(profile) else {
+        return Ok(released);
+    };
+    if managed.session_id != owner {
+        return Ok(released);
+    }
+    let had_original = managed.had_original;
+    released.previous_section = file.section_text(profile)?;
+    match (had_original, backup) {
+        (true, Some(text)) => {
+            file.write_raw_section(profile, &text)?;
+            released.backup_key = Some(backup_key(profile));
+        }
+        (true, None) => {
+            file.remove_section(profile)?;
+            released.backup_missing = true;
+        }
+        (false, _) => file.remove_section(profile)?,
+    }
+    released.changed = true;
+    next.managed_profiles.remove(profile);
+    Ok(released)
 }
 
 fn rollback_all(file: &CredentialsFile, released: &[Released]) {

@@ -73,6 +73,10 @@ impl Leapp {
         if let Some(url) = &self.config.endpoints.sts {
             config = config.endpoint_url(url);
         }
+        // After `shutdown` began, no new call to AWS.
+        if self.state.lock().unwrap().closing {
+            return Err(Error::Closing);
+        }
         let output = aws_sdk_sts::Client::from_conf(config.build())
             .get_session_token()
             .duration_seconds(TOKEN_DURATION_SECONDS)
@@ -105,13 +109,13 @@ fn body(token: CachedToken, region: String) -> SectionBody {
     }
 }
 
-/// The message from AWS if there is one, else the full error chain.
+/// The message from AWS if there is one and it is not empty, else the full error chain.
 fn aws_message<E>(error: &aws_sdk_sts::error::SdkError<E>) -> String
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    match error.message() {
-        Some(message) => message.to_string(),
-        None => DisplayErrorContext(error).to_string(),
+    match error.message().map(str::trim) {
+        Some(message) if !message.is_empty() => message.to_string(),
+        _ => DisplayErrorContext(error).to_string(),
     }
 }
