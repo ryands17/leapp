@@ -3,13 +3,13 @@
 mod bridge;
 mod views;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use leapp_core::{Leapp, NewIamUser, SessionId, SessionStatus, Workspace};
-use rune::{AppSpec, Cx, El, TextEdit, Tx, Waker};
+use rune::{AppSpec, Cx, El, PointerPress, TextEdit, Tx, Waker};
 use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
 
@@ -29,6 +29,20 @@ enum Question {
         session: String,
         reply: oneshot::Sender<Option<String>>,
     },
+}
+
+/// The open row menu: of which session, and where a right-click opened it (`None`: under its
+/// `⋯` button).
+#[derive(Clone, Copy)]
+pub(crate) struct RowMenu {
+    pub(crate) id: SessionId,
+    pub(crate) at: Option<PointerPress>,
+}
+
+/// The open question "delete this session?".
+pub(crate) struct DeleteAsk {
+    pub(crate) id: SessionId,
+    pub(crate) name: String,
 }
 
 /// True if `code`, without the spaces around it, is exactly 6 ASCII digits.
@@ -69,6 +83,13 @@ pub struct Ui {
     question_armed: bool,
     /// The field of the MFA dialog. Secure. A new MFA question at the front gets a new, empty one.
     mfa_code: TextEdit,
+    /// Sessions whose start the UI asked for and that did not end yet. They show `Pending` even
+    /// if a workspace read comes before core marks the start.
+    starting: HashSet<SessionId>,
+    /// The open row menu, if any.
+    menu: Option<RowMenu>,
+    /// The open delete confirm, if any.
+    delete: Option<DeleteAsk>,
 }
 
 impl Ui {
@@ -86,6 +107,9 @@ impl Ui {
             question_since: None,
             question_armed: false,
             mfa_code: empty_mfa_code(),
+            starting: HashSet::new(),
+            menu: None,
+            delete: None,
         }
     }
 
@@ -214,11 +238,14 @@ impl Ui {
         match status {
             SessionStatus::Pending => {}
             SessionStatus::Inactive => {
-                if let Some(s) = self.ws.sessions.iter_mut().find(|s| s.id == id) {
-                    s.status = SessionStatus::Pending;
-                }
+                self.starting.insert(id);
+                self.mark_starting();
                 let leapp = self.leapp.clone();
-                self.run(async move { leapp.start(id).await });
+                let bridge = self.bridge.clone();
+                self.rt.spawn(async move {
+                    let error = leapp.start(id).await.err().map(|e| e.to_string());
+                    bridge.send(Msg::StartDone { id, error });
+                });
             }
             SessionStatus::Active => {
                 let leapp = self.leapp.clone();
@@ -242,18 +269,70 @@ impl Ui {
         });
     }
 
+    /// Shows every session in `starting` as `Pending`.
+    fn mark_starting(&mut self) {
+        for s in &mut self.ws.sessions {
+            if self.starting.contains(&s.id) {
+                s.status = SessionStatus::Pending;
+            }
+        }
+    }
+
+    pub(crate) fn row_menu(&self) -> Option<RowMenu> {
+        self.menu
+    }
+
+    /// Opens the row menu of `id`, at `at` or under its `⋯` button.
+    pub(crate) fn open_menu(&mut self, id: SessionId, at: Option<PointerPress>) {
+        self.menu = Some(RowMenu { id, at });
+    }
+
+    pub(crate) fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    pub(crate) fn delete_ask(&self) -> Option<&DeleteAsk> {
+        self.delete.as_ref()
+    }
+
+    /// Asks the user if session `id` can be deleted. Ignored if the session is gone.
+    pub(crate) fn ask_delete(&mut self, id: SessionId) {
+        if let Some(session) = self.ws.session(id) {
+            self.delete = Some(DeleteAsk {
+                id,
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    /// Answers the delete confirm. Yes deletes the session off the render thread; an error
+    /// shows in the toast.
+    pub(crate) fn answer_delete(&mut self, yes: bool) {
+        let Some(ask) = self.delete.take() else {
+            return;
+        };
+        if yes {
+            let leapp = self.leapp.clone();
+            let id = ask.id;
+            self.run(async move { leapp.delete_session(id).await });
+        }
+    }
+
     fn refresh(&mut self) {
         self.ws = self.leapp.workspace();
+        self.mark_starting();
     }
 }
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
+    let main = views::main_window::view(s, &k, &mut layer);
     views::create_dialog::build(s, &k, &mut layer);
+    views::delete_dialog::build(s, &k, &mut layer);
     views::overwrite_dialog::build(s, &k, &mut layer);
     views::mfa_dialog::build(s, &k, &mut layer);
-    root(views::main_window::view(s, &k), layer)
+    root(main, layer)
 }
 
 /// Reads all bridge messages. True if the state changed.
@@ -273,6 +352,13 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             }
             Msg::AskMfa { session, reply } => {
                 s.questions.push_back(Question::Mfa { session, reply });
+            }
+            Msg::StartDone { id, error } => {
+                s.starting.remove(&id);
+                if let Some(message) = error {
+                    s.show_error(message);
+                }
+                s.refresh();
             }
             Msg::FormDone(result) => {
                 views::create_dialog::done(s, result);

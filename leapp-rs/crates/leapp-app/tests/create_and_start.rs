@@ -29,7 +29,7 @@ fn create_dialog_adds_a_session() {
     h.settle(|ui| ui.workspace().sessions.len() == 1);
 
     assert!(!h.has("dlg-iam-user"));
-    let rows = h.keys_with_prefix("row-");
+    let rows = h.row_keys();
     assert_eq!(rows.len(), 1);
     let id = rows[0].strip_prefix("row-").unwrap().to_string();
     assert_eq!(

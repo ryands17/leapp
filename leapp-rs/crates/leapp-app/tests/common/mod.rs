@@ -9,11 +9,16 @@ use std::time::{Duration, Instant};
 
 use fake_aws::FakeAws;
 use leapp_app::{Bridge, Ui, UiPrompter};
+use leapp_core::SessionId;
 use leapp_core::{Config, Error, Leapp, MemoryStore, NewIamUser, SecretStore};
+use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use tempfile::TempDir;
 
 pub const SIZE: (f32, f32) = (1100.0, 700.0);
+
+/// The worker threads of the harness's tokio runtime.
+const WORKERS: usize = 2;
 
 pub struct AppHarness {
     pub home: TempDir,
@@ -26,6 +31,8 @@ pub struct AppHarness {
     /// A clone of the Ui's bridge, so tests can send messages.
     pub bridge: Bridge,
     pub rt: Runtime<Ui>,
+    /// The clipboard of `rt`: in memory, never the OS clipboard.
+    clipboard: MemoryClipboard,
     tokio: tokio::runtime::Runtime,
 }
 
@@ -37,7 +44,7 @@ impl AppHarness {
     /// Like `new`, but runs `before` on the `Leapp` before the `Ui` reads the workspace.
     pub fn with_setup<T>(before: impl FnOnce(&Leapp) -> T) -> (AppHarness, T) {
         let tokio = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(WORKERS)
             .enable_all()
             .build()
             .unwrap();
@@ -55,6 +62,8 @@ impl AppHarness {
         let ui = Ui::new(leapp.clone(), tokio.handle().clone(), bridge.clone());
         let mut rt = Runtime::new(ui, leapp_app::view, SIZE, Env::new(false, 1.0));
         rt.poll = Some(leapp_app::poll);
+        let clipboard = rune::clipboard::memory();
+        rt.use_clipboard(&clipboard);
         let mut h = AppHarness {
             home,
             fake,
@@ -63,6 +72,7 @@ impl AppHarness {
             leapp,
             bridge,
             rt,
+            clipboard,
             tokio,
         };
         h.frames(1);
@@ -88,6 +98,28 @@ impl AppHarness {
         F::Output: Send + 'static,
     {
         self.tokio.spawn(f)
+    }
+
+    /// Blocks every tokio worker until the gate opens (or 10 s), so that no task of the UI or
+    /// of core runs in the meantime. Returns when all workers are blocked.
+    pub fn hold_workers(&self) -> Gate {
+        let gate = Gate::default();
+        let blocked = Arc::new((Mutex::new(0usize), Condvar::new()));
+        for _ in 0..WORKERS {
+            let (gate, blocked) = (gate.clone(), blocked.clone());
+            self.tokio.spawn(async move {
+                *blocked.0.lock().unwrap() += 1;
+                blocked.1.notify_all();
+                gate.pass();
+            });
+        }
+        let count = blocked.0.lock().unwrap();
+        let (count, timeout) = blocked
+            .1
+            .wait_timeout_while(count, Duration::from_secs(5), |n| *n < WORKERS)
+            .unwrap();
+        assert!(!timeout.timed_out(), "only {} workers blocked", *count);
+        gate
     }
 
     /// Runs frames for the arming delay of the question (harness time), so that the
@@ -137,6 +169,33 @@ impl AppHarness {
         self.rt.pointer_down(x, y);
         self.rt.pointer_up(x, y);
         self.frames(2);
+    }
+
+    /// A secondary press (right-click) on the element `key`.
+    pub fn secondary_tap(&mut self, key: &str) {
+        let (x, y) = self
+            .rt
+            .find(key)
+            .unwrap_or_else(|| panic!("no element with key {key:?}"));
+        self.rt.secondary_down(x, y);
+        self.rt.secondary_up(x, y);
+        self.frames(2);
+    }
+
+    /// Taps the item of the open row menu of session `id` whose text is `label`.
+    pub fn tap_menu_item(&mut self, id: SessionId, label: &str) {
+        let prefix = format!("menu-{id}-item");
+        let key = self
+            .keys_with_prefix(&prefix)
+            .into_iter()
+            .find(|k| self.text_of(k).as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("no menu item {label:?} under {prefix:?}"));
+        self.tap(&key);
+    }
+
+    /// The text on the clipboard of the UI, if any.
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.clipboard.text().map(|t| t.as_str().to_string())
     }
 
     /// Presses one key, such as `Key::Enter`, on the focused element.
@@ -233,6 +292,15 @@ impl AppHarness {
             .presented(key)
             .unwrap_or_else(|| panic!("no element with key {key:?}"))
             .0
+    }
+
+    /// The keys of the session rows (`row-<id>`), top to bottom. Not their `row-menu-<id>`
+    /// buttons.
+    pub fn row_keys(&self) -> Vec<String> {
+        self.keys_with_prefix("row-")
+            .into_iter()
+            .filter(|k| !k.starts_with("row-menu-"))
+            .collect()
     }
 
     /// The keys of all elements whose key starts with `prefix`, top to bottom.

@@ -11,7 +11,7 @@ fn empty_workspace_shows_the_empty_state() {
 
     assert!(h.has("empty-state"));
     assert_eq!(h.text_of("empty-state").as_deref(), Some("No sessions yet"));
-    assert!(h.keys_with_prefix("row-").is_empty());
+    assert!(h.row_keys().is_empty());
     assert!(h.has("sidebar"));
     assert_eq!(
         h.text_of("nav-all-sessions").as_deref(),
@@ -28,7 +28,7 @@ fn existing_sessions_show_as_rows() {
 
     assert!(!h.has("empty-state"));
     assert!(h.has("table"));
-    assert_eq!(h.keys_with_prefix("row-"), vec![format!("row-{id}")]);
+    assert_eq!(h.row_keys(), vec![format!("row-{id}")]);
     assert_eq!(
         h.text_of(&format!("cell-name-{id}")).as_deref(),
         Some("dev")
@@ -108,7 +108,7 @@ fn the_one_session_scene_shows_one_inactive_row() {
     h.rt.update(|_, _| ());
     h.frames(2);
 
-    let rows = h.keys_with_prefix("row-");
+    let rows = h.row_keys();
     assert_eq!(rows.len(), 1);
     let id = rows[0].strip_prefix("row-").unwrap();
     assert_eq!(
@@ -150,4 +150,51 @@ fn the_narrowest_window_keeps_the_table_headers_apart() {
         status[0] + status[2] <= min_w,
         "the status dot {status:?} is outside the {min_w} px window"
     );
+}
+
+#[test]
+fn the_empty_state_has_an_add_session_button() {
+    let mut h = AppHarness::new();
+    assert_eq!(
+        h.text_of("btn-empty-add-session").as_deref(),
+        Some("Add session")
+    );
+    assert!(!h.has("dlg-iam-user"));
+
+    h.tap("btn-empty-add-session");
+
+    assert!(h.has("dlg-iam-user"), "the create form is open");
+    assert!(h.rt.state.create_form().is_open());
+}
+
+#[test]
+fn a_starting_session_stays_pending_through_other_updates() {
+    let (mut h, id) =
+        AppHarness::with_setup(|leapp| leapp.create_iam_user(iam_user("dev", "ci")).unwrap());
+    h.fake
+        .delay_next("GetSessionToken", std::time::Duration::from_millis(300));
+    let status = format!("status-{id}");
+    let (x, y) = h.rt.find(&format!("row-{id}")).unwrap();
+    // No task runs until the refresh below: core has not marked the start when the UI reads
+    // the workspace again.
+    let workers = h.hold_workers();
+    for _ in 0..2 {
+        h.rt.pointer_down(x - 100.0, y);
+        h.rt.pointer_up(x - 100.0, y);
+        h.frames(1);
+    }
+    assert_eq!(h.text_of(&status).as_deref(), Some("pending"));
+    // Another update reads the workspace at once, before core marks the start.
+    h.bridge.send(Msg::Refreshed);
+    h.frames(1);
+
+    assert_eq!(h.text_of(&status).as_deref(), Some("pending"));
+    assert_eq!(
+        h.leapp.workspace().session(id).unwrap().status,
+        SessionStatus::Inactive,
+        "core has not marked the start yet"
+    );
+    workers.open();
+    h.settle(|ui| ui.workspace().session(id).unwrap().status == SessionStatus::Active);
+    assert_eq!(h.text_of(&status).as_deref(), Some("active"));
 }

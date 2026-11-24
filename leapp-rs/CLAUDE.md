@@ -52,6 +52,7 @@ Run all commands in `leapp-rs/`.
   a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
+- rune-kit `Menu::new(k)` keys its frame `<k>-menu` and its items `<k>-item<i>`. A chosen item does not close the menu: each `on_select` clears the app's open-menu state. `row-` also matches the `row-menu-<id>` buttons: tests list rows with `AppHarness::row_keys`.
 - A revealed secure field (`TextInput::revealed(true)`) stays secure: `has_secure_focus()` is still true and the
   element tree has no text for it. A field's placeholder is only in `rt.accessibility_json()` (`AppHarness::placeholder_of`).
 

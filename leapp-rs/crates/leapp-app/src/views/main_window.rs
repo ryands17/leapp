@@ -3,7 +3,9 @@
 
 use leapp_core::{Session, SessionKind, SessionStatus, Workspace};
 use rune::{Color, El, Icon, ScrollSpec, col, el, hairline, oklch, row, text};
-use rune_kit::{IconButton, IconButtonVariant, Kit, Spinner};
+use rune_kit::{Button, IconButton, IconButtonVariant, Kit, Spinner};
+
+use super::row_menu::MENU_BUTTON_WIDTH;
 
 use crate::Ui;
 
@@ -27,6 +29,7 @@ pub(crate) const MIN_WINDOW_WIDTH: f32 = SIDEBAR_WIDTH
     + PROVIDER_WIDTH
     + PROFILE_WIDTH
     + REGION_WIDTH
+    + MENU_BUTTON_WIDTH
     + STATUS_WIDTH;
 
 /// The (+) of the toolbar: a circle with a plus in it.
@@ -46,7 +49,8 @@ fn grey() -> Color {
     oklch(0.55, 0.0, 0.0)
 }
 
-pub(crate) fn view(s: &Ui, k: &Kit) -> El {
+/// The main window. Row menus go to `layer`.
+pub(crate) fn view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
     let mut main = col()
         .grow(1.0)
         .h_full()
@@ -57,7 +61,7 @@ pub(crate) fn view(s: &Ui, k: &Kit) -> El {
     main = if s.ws.sessions.is_empty() {
         main.child(empty_state(k))
     } else {
-        main.child(table(&s.ws, k))
+        main.child(table(s, k, layer))
     };
     if let Some(message) = &s.error {
         main = main.child(error_toast(message, k));
@@ -109,11 +113,23 @@ fn toolbar(k: &Kit) -> El {
 }
 
 fn empty_state(k: &Kit) -> El {
-    col().key("empty-state").grow(1.0).w_full().center().child(
-        text("No sessions yet")
-            .font(k.ty.ui_medium)
-            .color(k.c.text_muted),
-    )
+    col()
+        .key("empty-state")
+        .grow(1.0)
+        .w_full()
+        .center()
+        .gap(12.0)
+        .child(
+            text("No sessions yet")
+                .font(k.ty.ui_medium)
+                .color(k.c.text_muted),
+        )
+        .child(
+            Button::new("Add session")
+                .on_press(super::create_dialog::open)
+                .build(k)
+                .key("btn-empty-add-session"),
+        )
 }
 
 /// Active sessions first, then the others. Each group in name order.
@@ -126,7 +142,8 @@ fn sorted(ws: &Workspace) -> Vec<&Session> {
     sessions
 }
 
-fn table(ws: &Workspace, k: &Kit) -> El {
+fn table(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let ws = &s.ws;
     let header = row()
         .w_full()
         .h(44.0)
@@ -141,10 +158,12 @@ fn table(ws: &Workspace, k: &Kit) -> El {
         .child(header_cell("hdr-provider", "Provider", k).w(PROVIDER_WIDTH))
         .child(header_cell("hdr-profile", "Named Profile", k).w(PROFILE_WIDTH))
         .child(header_cell("hdr-region", "Region", k).w(REGION_WIDTH))
+        .child(el().w(MENU_BUTTON_WIDTH))
         .child(el().w(STATUS_WIDTH));
     let mut rows = col().w_full();
     for session in sorted(ws) {
-        rows = rows.child(session_row(ws, session, k));
+        let menu = super::row_menu::build(s, session, k, layer);
+        rows = rows.child(session_row(ws, session, menu, k));
     }
     col()
         .key("table")
@@ -171,7 +190,8 @@ fn header_cell(key: &str, title: &str, k: &Kit) -> El {
         .truncate()
 }
 
-fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
+/// One row. `menu` is the row's `⋯` button.
+fn session_row(ws: &Workspace, s: &Session, menu: El, k: &Kit) -> El {
     let id = s.id;
     let profile = ws.profile_name(s.profile_id).unwrap_or_default();
     let name = text(s.name.clone())
@@ -197,6 +217,7 @@ fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
         .key(format!("row-{id}"))
         .role("row")
         .on_double_press(move |s: &mut Ui| s.toggle(id))
+        .on_secondary_press(move |s: &mut Ui, p, _| s.open_menu(id, Some(p)))
         .w_full()
         .h(ROW_HEIGHT)
         .px(TABLE_PADDING_X)
@@ -215,6 +236,7 @@ fn session_row(ws: &Workspace, s: &Session, k: &Kit) -> El {
             ),
         )
         .child(row().w(REGION_WIDTH).child(region))
+        .child(row().w(MENU_BUTTON_WIDTH).center().child(menu))
         .child(
             row()
                 .w(STATUS_WIDTH)

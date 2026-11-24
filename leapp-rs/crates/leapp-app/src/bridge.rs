@@ -20,6 +20,11 @@ pub enum Msg {
         profile: String,
         reply: oneshot::Sender<bool>,
     },
+    /// The start of session `id` that the UI asked for ended. `error` is for the user.
+    StartDone {
+        id: leapp_core::SessionId,
+        error: Option<String>,
+    },
     /// The create or save of the session form ended. `poll` closes the form, or shows the error
     /// in it.
     FormDone(Result<(), leapp_core::Error>),
