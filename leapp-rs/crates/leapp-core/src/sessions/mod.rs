@@ -37,6 +37,9 @@ impl Leapp {
             if pending_on(ws, session.profile_id) {
                 return Err(pending_error());
             }
+            if state.editing.contains(&id) {
+                return Err(editing_error());
+            }
             let to_stop: Vec<SessionId> = ws
                 .sessions
                 .iter()
@@ -54,8 +57,9 @@ impl Leapp {
         for other in to_stop {
             self.stop(other).await?;
         }
-        // An edit is refused while the session is `Pending`, so the keys cannot change between
-        // here and the key read of this start.
+        // An edit is refused while the session is `Pending`, and this start is refused while an
+        // edit has the session reserved, so the keys cannot change between here and the key
+        // read of this start. The check is in the same critical section that sets `Pending`.
         let key_generation = {
             let mut state = self.state.lock().unwrap();
             if state.closing {
@@ -63,6 +67,9 @@ impl Leapp {
             }
             if pending_on(&state.ws, profile_id) {
                 return Err(pending_error());
+            }
+            if state.editing.contains(&id) {
+                return Err(editing_error());
             }
             set_status(&mut state.ws, id, SessionStatus::Pending);
             key_generation(&state, id)
@@ -582,6 +589,10 @@ fn pending_on(ws: &Workspace, profile_id: Uuid) -> bool {
 
 fn pending_error() -> Error {
     Error::ProfilePending("Another session with the same named profile is starting".into())
+}
+
+fn editing_error() -> Error {
+    Error::ProfilePending("The session is being changed. Try again.".into())
 }
 
 fn releasing_error(profile: &str) -> Error {

@@ -45,6 +45,10 @@ struct State {
     /// when it sets `Pending`; its account fetch saves only if it is unchanged, so an account
     /// fetched with the old keys never lands after the edit cleared it (F1-R4, F1-R5).
     key_generation: HashMap<SessionId, u64>,
+    /// Sessions that an edit changes now. The edit writes the keys outside the lock before it
+    /// saves; a start of such a session returns `Error::ProfilePending`, so that it cannot read
+    /// keys that the edit may still put back.
+    editing: HashSet<SessionId>,
 }
 
 impl Leapp {
@@ -59,6 +63,7 @@ impl Leapp {
                 closing: false,
                 releasing: HashSet::new(),
                 key_generation: HashMap::new(),
+                editing: HashSet::new(),
             }),
         })
     }

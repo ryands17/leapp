@@ -2,9 +2,10 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::Harness;
+use common::{FlakyStore, Harness};
 use leapp_core::{Error, Field, IamUserUpdate, SessionId, SessionKind, SessionStatus};
 
 const MINE: &str = "[default]\naws_access_key_id = MYKEY\naws_secret_access_key = MYSECRET\n";
@@ -328,6 +329,88 @@ async fn an_account_fetched_with_the_old_keys_is_not_saved_after_an_edit_of_the_
     edited.unwrap();
     assert_eq!(account(&h, id), None);
     assert!(!h.workspace_text().contains("111111111111"));
+}
+
+/// Runs `fut` on a new runtime on this thread.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
+}
+
+/// An edit writes the new keys to the keychain before it saves. A start in that window would
+/// read the new access key with the old secret and cache a token that the keychain and the
+/// workspace do not show. The edit reserves the session, so such a start is refused.
+async fn a_start_while_an_edit_writes_the_keys_is_refused(active: bool) {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    if active {
+        h.leapp.start(id).await.unwrap();
+    }
+    let calls_before = h.fake.count("GetSessionToken");
+
+    // The access key is written; the write of the secret waits at the gate.
+    let gate = store.block_set(&format!("iam-user-{id}-secret-access-key"));
+    let mut req = same_as_now(&h, id);
+    req.access_key_id = Some("AKID-NEW".into());
+    req.secret_access_key = Some("SECRET-NEW".into());
+    let leapp = &h.leapp;
+    let (early_start, edited) = std::thread::scope(|scope| {
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(id, req)));
+        gate.wait_blocked();
+
+        let early_start = scope.spawn(|| block_on(leapp.start(id))).join().unwrap();
+
+        gate.open();
+        (early_start, editor.join().unwrap())
+    });
+
+    assert!(
+        matches!(early_start, Err(Error::ProfilePending(_))),
+        "{early_start:?}"
+    );
+    edited.unwrap();
+    // The `GetSessionToken` calls after the setup, by access key. The refused start made none.
+    let token_calls = || {
+        h.fake
+            .requests()
+            .into_iter()
+            .filter(|r| r.action == "GetSessionToken")
+            .skip(calls_before)
+            .map(|r| r.access_key_id)
+            .collect::<Vec<_>>()
+    };
+    if active {
+        // Only the restart of the edit got a token, with the new keys.
+        assert_eq!(token_calls(), vec![Some("AKID-NEW".to_string())]);
+        assert_eq!(
+            h.leapp.workspace().session(id).unwrap().status,
+            SessionStatus::Active
+        );
+    } else {
+        assert_eq!(token_calls(), Vec::<Option<String>>::new());
+        assert!(!h.secrets.snapshot().contains_key(&token_key(id)));
+        assert_eq!(account(&h, id), None);
+        h.leapp.start(id).await.unwrap();
+        assert_eq!(token_calls(), vec![Some("AKID-NEW".to_string())]);
+    }
+}
+
+// Multi-thread: the fake AWS server must answer while this thread waits on the scoped threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_while_an_edit_writes_the_keys_of_an_inactive_session_is_refused() {
+    a_start_while_an_edit_writes_the_keys_is_refused(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_while_an_edit_restarts_a_session_with_new_keys_is_refused() {
+    a_start_while_an_edit_writes_the_keys_is_refused(true).await;
 }
 
 #[tokio::test]

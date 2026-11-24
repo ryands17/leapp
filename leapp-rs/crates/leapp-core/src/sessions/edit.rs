@@ -1,10 +1,12 @@
 //! Edit and delete of sessions (F1-R3, F1-R4, F1-R6, spec 10.3 without the cascade, F1-R9).
 
-use super::{pending_error, pending_on, profile_name};
+use std::sync::Mutex;
+
+use super::{editing_error, pending_error, pending_on, profile_name};
 use crate::error::{Error, Field, Result};
 use crate::model::{IamUserUpdate, SessionId, SessionKind, SessionStatus};
 use crate::secrets::SecretStore;
-use crate::{Leapp, profile_id_for, store, validate};
+use crate::{Leapp, State, profile_id_for, store, validate};
 
 /// The keychain keys of an IAM User session.
 struct KeyNames {
@@ -90,19 +92,21 @@ impl Leapp {
             req.mfa_device.as_deref(),
         )?;
 
-        let (was_active, old_profile, old_region, old_mfa) = {
-            let state = self.state.lock().unwrap();
+        let ((was_active, old_profile, old_region, old_mfa), reservation) = {
+            let mut state = self.state.lock().unwrap();
             let session = state.ws.session(id).ok_or(Error::NotFound(id))?;
             if session.status == SessionStatus::Pending {
                 return Err(pending_error());
             }
             let SessionKind::IamUser { mfa_device, .. } = &session.kind;
-            (
+            let seen = (
                 session.status == SessionStatus::Active,
                 profile_name(&state.ws, session.profile_id)?,
                 session.region.clone(),
                 mfa_device.clone(),
-            )
+            );
+            let reservation = Editing::reserve(&self.state, &mut state, id)?;
+            (seen, reservation)
         };
 
         // The keychain is read without the lock.
@@ -198,6 +202,8 @@ impl Leapp {
             let _ = secrets.delete(&names.token);
         }
 
+        // The edit is saved or undone; the restart below is a normal start.
+        drop(reservation);
         if restart {
             self.start(id).await?;
         }
@@ -243,6 +249,33 @@ impl Leapp {
             Some(p) => Err(Error::BackupMissing(p)),
             None => Ok(()),
         }
+    }
+}
+
+/// Reserves a session for an edit: a start of it returns `Error::ProfilePending` until the drop.
+/// The drop takes the lock again and removes the mark, on every path. Create it under the lock,
+/// in the same critical section that checks that the session is not `Pending`; drop it only
+/// after the guard is dropped.
+struct Editing<'a> {
+    state: &'a Mutex<State>,
+    id: SessionId,
+}
+
+impl<'a> Editing<'a> {
+    /// Marks `id` as reserved. Returns `Error::ProfilePending` if another edit has it.
+    fn reserve(state: &'a Mutex<State>, locked: &mut State, id: SessionId) -> Result<Editing<'a>> {
+        if !locked.editing.insert(id) {
+            return Err(editing_error());
+        }
+        Ok(Editing { state, id })
+    }
+}
+
+impl Drop for Editing<'_> {
+    fn drop(&mut self) {
+        // A poisoned lock still holds valid data here: remove the mark all the same.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.editing.remove(&self.id);
     }
 }
 

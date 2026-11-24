@@ -55,7 +55,7 @@ impl Prompter for ScriptedPrompter {
     }
 }
 
-/// A `MemoryStore` that can fail a chosen `set` and hold `get` or `delete` calls until a gate
+/// A `MemoryStore` that can fail a chosen `set` and hold `get`, `set` or `delete` calls until a gate
 /// opens.
 #[derive(Default)]
 pub struct FlakyStore {
@@ -64,6 +64,7 @@ pub struct FlakyStore {
     sets_before_failure: Mutex<Option<usize>>,
     gates: Mutex<Vec<(String, Gate)>>,
     delete_gates: Mutex<Vec<(String, Gate)>>,
+    set_gates: Mutex<Vec<(String, Gate)>>,
 }
 
 impl FlakyStore {
@@ -76,6 +77,16 @@ impl FlakyStore {
     pub fn block_get(&self, key_prefix: &str) -> Gate {
         let gate = Gate::default();
         self.gates
+            .lock()
+            .unwrap()
+            .push((key_prefix.to_string(), gate.clone()));
+        gate
+    }
+
+    /// A `set` of a key that starts with `key_prefix` waits until the gate opens.
+    pub fn block_set(&self, key_prefix: &str) -> Gate {
+        let gate = Gate::default();
+        self.set_gates
             .lock()
             .unwrap()
             .push((key_prefix.to_string(), gate.clone()));
@@ -114,6 +125,7 @@ impl SecretStore for FlakyStore {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
+        pass_gates(&self.set_gates, key);
         {
             let mut left = self.sets_before_failure.lock().unwrap();
             match *left {
@@ -134,7 +146,7 @@ impl SecretStore for FlakyStore {
     }
 }
 
-/// Holds the `get` or `delete` calls of a `FlakyStore` until `open`.
+/// Holds the `get`, `set` or `delete` calls of a `FlakyStore` until `open`.
 #[derive(Clone, Default)]
 pub struct Gate(Arc<(Mutex<GateState>, Condvar)>);
 
