@@ -9,23 +9,43 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use leapp_core::{Leapp, NewIamUser, SessionId, SessionStatus, Workspace};
-use rune::{AppSpec, Cx, El, Tx, Waker};
+use rune::{AppSpec, Cx, El, TextEdit, Tx, Waker};
 use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
 
 pub use bridge::{Bridge, Msg, UiPrompter};
 pub use views::create_dialog::CreateForm;
 
-/// A question from core that waits for the user's answer.
-struct PendingConfirm {
-    profile: String,
-    reply: oneshot::Sender<bool>,
+/// A question from core that waits for the user's answer. Dropping it without an answer means
+/// no (overwrite) or cancel (MFA).
+enum Question {
+    /// Can core overwrite the user's named profile?
+    Overwrite {
+        profile: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// The MFA code for the session `session` (its name). `None` cancels.
+    Mfa {
+        session: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
+}
+
+/// True if `code`, without the spaces around it, is exactly 6 ASCII digits.
+fn is_valid_mfa_code(code: &str) -> bool {
+    let code = code.trim();
+    code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An empty, secure field for the MFA code. `TextEdit` wipes its buffers when it drops.
+fn empty_mfa_code() -> TextEdit {
+    TextEdit::default().secure()
 }
 
 /// How long the error toast stays, in seconds.
 const TOAST_SECONDS: f64 = 8.0;
 
-/// For how long, in seconds, the overwrite question ignores answers after it comes to the front.
+/// For how long, in seconds, a question ignores answers after it comes to the front.
 /// The second click of a double-click on "Overwrite" must not answer the next question.
 pub const CONFIRM_ARM_SECONDS: f64 = 0.5;
 
@@ -39,13 +59,16 @@ pub struct Ui {
     /// The clock of `poll` when the toast first showed. `None` until the next `poll`.
     error_since: Option<f64>,
     create: CreateForm,
-    /// Questions from core, oldest first. The dialog shows the first one.
-    confirms: VecDeque<PendingConfirm>,
+    /// Questions from core, oldest first. A dialog shows the first one.
+    questions: VecDeque<Question>,
     /// The clock of `poll` when the first question came to the front. `None` until the next
     /// `poll`.
-    confirm_since: Option<f64>,
-    /// True when the first question takes answers: [`CONFIRM_ARM_SECONDS`] after `confirm_since`.
-    confirm_armed: bool,
+    question_since: Option<f64>,
+    /// True when the first question takes answers: [`CONFIRM_ARM_SECONDS`] after
+    /// `question_since`.
+    question_armed: bool,
+    /// The field of the MFA dialog. Secure. A new MFA question at the front gets a new, empty one.
+    mfa_code: TextEdit,
 }
 
 impl Ui {
@@ -59,9 +82,10 @@ impl Ui {
             error: None,
             error_since: None,
             create: CreateForm::default(),
-            confirms: VecDeque::new(),
-            confirm_since: None,
-            confirm_armed: false,
+            questions: VecDeque::new(),
+            question_since: None,
+            question_armed: false,
+            mfa_code: empty_mfa_code(),
         }
     }
 
@@ -82,27 +106,86 @@ impl Ui {
 
     /// The profile of the overwrite question that the dialog shows now, if any.
     pub fn pending_confirm(&self) -> Option<&str> {
-        self.confirms.front().map(|c| c.profile.as_str())
+        match self.questions.front() {
+            Some(Question::Overwrite { profile, .. }) => Some(profile),
+            _ => None,
+        }
     }
 
-    /// How many overwrite questions wait for an answer, the open one included.
-    pub fn pending_confirm_count(&self) -> usize {
-        self.confirms.len()
+    /// The session name of the MFA question that the dialog shows now, if any.
+    pub fn pending_mfa(&self) -> Option<&str> {
+        match self.questions.front() {
+            Some(Question::Mfa { session, .. }) => Some(session),
+            _ => None,
+        }
     }
 
-    /// Answers the first waiting question. Later questions stay in line. An answer in the first
-    /// [`CONFIRM_ARM_SECONDS`] after the question came to the front is ignored.
+    /// How many questions wait for an answer, the open one included.
+    pub fn pending_question_count(&self) -> usize {
+        self.questions.len()
+    }
+
+    /// True when the question in front takes answers.
+    pub(crate) fn question_armed(&self) -> bool {
+        self.question_armed
+    }
+
+    /// True when the MFA dialog can submit its code: armed, and the code is 6 digits.
+    pub(crate) fn can_submit_mfa(&self) -> bool {
+        self.question_armed && is_valid_mfa_code(&self.mfa_code.text)
+    }
+
+    /// Takes the question in front off the line. Later questions stay in line; the next one
+    /// starts its own arming delay at the next `poll`.
+    fn pop_question(&mut self) -> Option<Question> {
+        let q = self.questions.pop_front()?;
+        self.question_since = None;
+        self.question_armed = false;
+        Some(q)
+    }
+
+    /// Answers the overwrite question in front. Ignored if the front question is not an
+    /// overwrite question, or if it is not armed: an answer in the first
+    /// [`CONFIRM_ARM_SECONDS`] after it came to the front is ignored.
     pub(crate) fn answer_confirm(&mut self, yes: bool) {
-        if !self.confirm_armed {
+        if !self.question_armed || self.pending_confirm().is_none() {
             return;
         }
-        if let Some(c) = self.confirms.pop_front() {
-            // The next question starts its own delay at the next `poll`.
-            self.confirm_since = None;
-            self.confirm_armed = false;
+        if let Some(Question::Overwrite { reply, .. }) = self.pop_question() {
             // The task of core can end before the answer: then nobody waits for it.
-            let _ = c.reply.send(yes);
+            let _ = reply.send(yes);
         }
+    }
+
+    /// Sends the code of the MFA dialog, trimmed. Ignored unless [`Ui::can_submit_mfa`].
+    pub(crate) fn submit_mfa(&mut self) {
+        if !self.can_submit_mfa() || self.pending_mfa().is_none() {
+            return;
+        }
+        let code = self.mfa_code.text.trim().to_string();
+        self.mfa_code = empty_mfa_code();
+        if let Some(Question::Mfa { reply, .. }) = self.pop_question() {
+            let _ = reply.send(Some(code));
+        }
+    }
+
+    /// Cancels the MFA question in front. Ignored until it is armed.
+    pub(crate) fn cancel_mfa(&mut self) {
+        if !self.question_armed || self.pending_mfa().is_none() {
+            return;
+        }
+        self.mfa_code = empty_mfa_code();
+        if let Some(Question::Mfa { reply, .. }) = self.pop_question() {
+            let _ = reply.send(None);
+        }
+    }
+
+    pub(crate) fn mfa_code(&self) -> &TextEdit {
+        &self.mfa_code
+    }
+
+    pub(crate) fn mfa_code_mut(&mut self) -> &mut TextEdit {
+        &mut self.mfa_code
     }
 
     /// Shows `message` in the error toast. The toast hides after [`TOAST_SECONDS`].
@@ -163,6 +246,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let mut layer = Vec::new();
     views::create_dialog::build(s, &k, &mut layer);
     views::overwrite_dialog::build(s, &k, &mut layer);
+    views::mfa_dialog::build(s, &k, &mut layer);
     root(views::main_window::view(s, &k), layer)
 }
 
@@ -178,15 +262,34 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
                 s.refresh();
             }
             Msg::ConfirmOverwrite { profile, reply } => {
-                s.confirms.push_back(PendingConfirm { profile, reply });
+                s.questions
+                    .push_back(Question::Overwrite { profile, reply });
+            }
+            Msg::AskMfa { session, reply } => {
+                s.questions.push_back(Question::Mfa { session, reply });
             }
         }
     }
-    if !s.confirms.is_empty() && !s.confirm_armed {
-        let since = *s.confirm_since.get_or_insert(t);
+    if !s.questions.is_empty() && !s.question_armed {
+        let since = match s.question_since {
+            Some(since) => since,
+            None => {
+                // The question just came to the front.
+                s.question_since = Some(t);
+                if s.pending_mfa().is_some() {
+                    // A new, empty field that takes the keys at once.
+                    s.mfa_code = empty_mfa_code();
+                    s.mfa_code.focused = true;
+                }
+                changed = true;
+                t
+            }
+        };
         let left = CONFIRM_ARM_SECONDS - (t - since);
         if left <= 0.0 {
-            s.confirm_armed = true;
+            s.question_armed = true;
+            // The buttons of the dialog become enabled.
+            changed = true;
         } else {
             // A `poll` must run when the delay ends, even if nothing else wakes the UI.
             tx.wake_after(Duration::from_secs_f64(left));
@@ -264,6 +367,12 @@ fn one_session(s: &mut Ui) {
 /// three). Cleans up the managed profiles, then quits. The UI thread waits for the cleanup: it is
 /// local file and keychain work.
 pub fn on_close(s: &mut Ui, tx: &mut Tx) {
+    // Drop the open questions: their tasks get no (overwrite) or cancel (MFA) and end, so no
+    // start waits for a dialog that is gone.
+    s.questions.clear();
+    s.question_since = None;
+    s.question_armed = false;
+    s.mfa_code = empty_mfa_code();
     let leapp = s.leapp.clone();
     if let Err(e) = s.rt.block_on(async move { leapp.shutdown().await }) {
         eprintln!("leapp-app: shutdown failed: {e}");

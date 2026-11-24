@@ -39,8 +39,15 @@ Run all commands in `leapp-rs/`.
 - The region field is a rune-kit `Combobox` keyed `sel-region`: its trigger is
   `sel-region-value-trigger`, its options are `sel-region-option-<region>`, and typed text goes to
   its search field once it is open. Tests find a region by typing it, not by its list position.
-- The overwrite question ignores answers for `CONFIRM_ARM_SECONDS` (0.5 s of harness time) after it
-  comes to the front. UI tests call `h.wait_for_arming()` before they tap `btn-overwrite-yes` or `-no`.
+- Every question (overwrite and MFA) ignores answers for `CONFIRM_ARM_SECONDS` (0.5 s of harness
+  time) after it comes to the front, and its buttons are disabled until then. UI tests call
+  `h.wait_for_arming()` before they tap `btn-overwrite-*` or `btn-mfa-*`.
+- A rune-kit `Dialog` focuses its first Tab stop (the close button), and `TextInput` has no
+  `autofocus`. To focus a field when a dialog opens, set `TextEdit::focused = true` in the model
+  (the field needs `on_edit`).
+- `ElementInfo` has no disabled flag. Read it from `rt.accessibility_json()`: the node keyed `k`
+  has `"disabled"` in its `states` (`AppHarness::is_disabled`).
+- A tap on a disabled button takes focus from a text field: tap the field again before you type.
 - `Runtime::wake_deadline()` gives only the earliest wake of all sources (Rune has its own wakes), so
   a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.

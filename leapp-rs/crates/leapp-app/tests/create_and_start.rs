@@ -358,7 +358,7 @@ fn two_questions() -> (AppHarness, (leapp_core::SessionId, leapp_core::SessionId
     let leapp = h.leapp.clone();
     let second = ids.1;
     h.rt.state.run(async move { leapp.start(second).await });
-    h.settle(|ui| ui.pending_confirm_count() == 2);
+    h.settle(|ui| ui.pending_question_count() == 2);
     (h, ids)
 }
 
@@ -393,7 +393,7 @@ fn a_double_click_does_not_answer_the_next_question() {
     h.tap("btn-overwrite-yes");
     h.tap("btn-overwrite-yes");
 
-    assert_eq!(h.rt.state.pending_confirm_count(), 1);
+    assert_eq!(h.rt.state.pending_question_count(), 1);
     assert_eq!(h.rt.state.pending_confirm(), Some("second"));
     assert!(h.text_of("dlg-overwrite").unwrap().contains("second"));
     h.settle(|ui| status(ui, ids.0) == SessionStatus::Active);
@@ -407,7 +407,7 @@ fn a_double_click_does_not_answer_the_next_question() {
     h.wait_for_arming();
     h.tap("btn-overwrite-yes");
     h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
-    assert_eq!(h.rt.state.pending_confirm_count(), 0);
+    assert_eq!(h.rt.state.pending_question_count(), 0);
     assert!(!credentials(&h).contains("AKIATWO"));
 }
 

@@ -20,6 +20,12 @@ pub enum Msg {
         profile: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Core asks for the MFA code of the session named `session`. Send the code, or `None` to
+    /// cancel, on `reply`.
+    AskMfa {
+        session: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
 }
 
 /// A channel from any thread to the UI thread. Clones share the same channel and waker.
@@ -94,8 +100,14 @@ impl Prompter for UiPrompter {
         answer.await.unwrap_or(false)
     }
 
-    /// Task 6 adds the dialog. Until then no code is given, which counts as a cancel.
-    async fn ask_mfa_code(&self, _session_name: &str) -> Option<String> {
-        None
+    /// Sends [`Msg::AskMfa`] and waits for the code. No answer (the UI dropped the question)
+    /// means cancel.
+    async fn ask_mfa_code(&self, session_name: &str) -> Option<String> {
+        let (reply, answer) = oneshot::channel();
+        self.bridge.send(Msg::AskMfa {
+            session: session_name.to_string(),
+            reply,
+        });
+        answer.await.ok().flatten()
     }
 }

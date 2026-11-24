@@ -14,3 +14,4 @@ tempfile.workspace = true
 
 [dev-dependencies]
 fake-aws = { path = "../fake-aws" }
+serde_json.workspace = true

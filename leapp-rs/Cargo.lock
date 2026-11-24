@@ -2288,6 +2288,7 @@ dependencies = [
  "leapp-core",
  "rune",
  "rune-kit",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

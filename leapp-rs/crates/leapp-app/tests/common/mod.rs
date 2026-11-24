@@ -75,7 +75,17 @@ impl AppHarness {
         }
     }
 
-    /// Runs frames for the arming delay of the overwrite question (harness time), so that the
+    /// Runs `f` on the harness's tokio runtime and returns its handle, so a test can wait for
+    /// the end of a task that the UI does not show.
+    pub fn spawn<F>(&self, f: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.tokio.spawn(f)
+    }
+
+    /// Runs frames for the arming delay of the question (harness time), so that the
     /// question in front takes an answer.
     pub fn wait_for_arming(&mut self) {
         let n = (leapp_app::CONFIRM_ARM_SECONDS * 60.0).ceil() as usize + 2;
@@ -107,7 +117,7 @@ impl AppHarness {
                     .iter()
                     .map(|s| s.status)
                     .collect::<Vec<_>>(),
-                self.rt.state.pending_confirm_count()
+                self.rt.state.pending_question_count()
             );
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -158,6 +168,38 @@ impl AppHarness {
             .find_map(|e| e.text.clone())
     }
 
+    /// True if a shown text element has exactly `text`.
+    pub fn has_text(&self, text: &str) -> bool {
+        self.rt
+            .elements()
+            .iter()
+            .any(|e| !e.exiting && e.text.as_deref() == Some(text))
+    }
+
+    /// True if any element of the tree shows `needle` in its text or label.
+    pub fn tree_contains(&self, needle: &str) -> bool {
+        self.rt.elements().iter().any(|e| {
+            e.text.as_deref().is_some_and(|t| t.contains(needle))
+                || e.label.as_deref().is_some_and(|t| t.contains(needle))
+        })
+    }
+
+    /// True if the accessibility tree marks the element `key` as disabled (rune-kit `Button`
+    /// disabled state).
+    pub fn is_disabled(&self, key: &str) -> bool {
+        fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+            if v["key"] == key {
+                return Some(v);
+            }
+            v["children"].as_array()?.iter().find_map(|c| find(c, key))
+        }
+        let tree = self.rt.accessibility_json();
+        let node = find(&tree, key).unwrap_or_else(|| panic!("no node keyed {key:?}"));
+        node["states"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|v| v == "disabled"))
+    }
+
     pub fn has(&self, key: &str) -> bool {
         self.rt.find(key).is_some()
     }
@@ -196,3 +238,13 @@ pub fn iam_user(name: &str, profile: &str) -> NewIamUser {
         mfa_device: None,
     }
 }
+
+/// Like [`iam_user`], with an MFA device.
+pub fn mfa_iam_user(name: &str, profile: &str) -> NewIamUser {
+    NewIamUser {
+        mfa_device: Some(MFA_DEVICE.to_string()),
+        ..iam_user(name, profile)
+    }
+}
+
+pub const MFA_DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
