@@ -2,7 +2,7 @@ mod common;
 
 use chrono::Duration;
 use common::Harness;
-use leapp_core::{SessionKind, SessionStatus};
+use leapp_core::{SessionKind, SessionStatus, TOKEN_REUSE_MARGIN};
 
 const TOKEN_LIFE: i64 = 36000;
 
@@ -117,4 +117,35 @@ async fn a_failed_caller_identity_does_not_fail_the_start() {
         SessionStatus::Active
     );
     assert_eq!(account(&h, id), None);
+    assert_eq!(h.fake.count("GetCallerIdentity"), 1);
+}
+
+/// Starts, stops, then sets the clock to `left` seconds before the stored expiration.
+async fn restart_with_time_left(left: i64) -> Harness {
+    let (h, clock) = Harness::with_manual_clock().await;
+    let id = started_and_stopped(&h).await;
+    let expiration = h
+        .leapp
+        .workspace()
+        .session(id)
+        .unwrap()
+        .session_token_expiration
+        .unwrap();
+    clock.set(expiration - secs(left));
+    h.leapp.start(id).await.unwrap();
+    h
+}
+
+#[tokio::test]
+async fn a_token_with_exactly_the_margin_left_is_replaced() {
+    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.num_seconds()).await;
+
+    assert_eq!(h.fake.count("GetSessionToken"), 2);
+}
+
+#[tokio::test]
+async fn a_token_with_one_second_more_than_the_margin_is_reused() {
+    let h = restart_with_time_left(TOKEN_REUSE_MARGIN.num_seconds() + 1).await;
+
+    assert_eq!(h.fake.count("GetSessionToken"), 1);
 }
