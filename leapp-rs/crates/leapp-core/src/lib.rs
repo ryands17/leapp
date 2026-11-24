@@ -9,7 +9,7 @@ mod secrets;
 mod sessions;
 mod store;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -18,8 +18,8 @@ use uuid::Uuid;
 pub use config::{Clock, Config, Endpoints, Prompter, SystemClock};
 pub use error::{Error, Field, Result};
 pub use model::{
-    ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind, SessionStatus,
-    Workspace,
+    IamUserUpdate, ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind,
+    SessionStatus, Workspace,
 };
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};
 pub use sessions::TOKEN_REUSE_MARGIN;
@@ -41,6 +41,10 @@ struct State {
     /// (outside the lock). A start on such a profile returns `Error::ProfilePending`, so that it
     /// cannot write a new backup that this delete then removes.
     releasing: HashSet<String>,
+    /// Bumped by each edit that changes the keys of a session (missing = 0). A start notes it
+    /// when it sets `Pending`; its account fetch saves only if it is unchanged, so an account
+    /// fetched with the old keys never lands after the edit cleared it (F1-R4, F1-R5).
+    key_generation: HashMap<SessionId, u64>,
 }
 
 impl Leapp {
@@ -54,6 +58,7 @@ impl Leapp {
                 ws: workspace,
                 closing: false,
                 releasing: HashSet::new(),
+                key_generation: HashMap::new(),
             }),
         })
     }
@@ -64,29 +69,24 @@ impl Leapp {
     }
 
     pub fn create_iam_user(&self, req: NewIamUser) -> Result<SessionId> {
-        let name = required(Field::Name, &req.name)?;
-        let access_key_id = required(Field::AccessKeyId, &req.access_key_id)?;
-        let secret_access_key = required(Field::SecretAccessKey, &req.secret_access_key)?;
-        let profile = required(Field::Profile, &req.profile_name)?;
-        if profile.contains(['[', ']', '\n', '\r']) {
-            return Err(Error::InvalidInput {
-                field: Field::Profile,
-                message: "must not contain [, ], or line breaks".into(),
-            });
-        }
-        if !regions::REGIONS.contains(&req.region.as_str()) {
-            return Err(Error::InvalidInput {
-                field: Field::Region,
-                message: format!("unknown region \"{}\"", req.region),
-            });
-        }
-
-        let mfa_device = req
-            .mfa_device
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .map(str::to_string);
+        let valid = validate(
+            &req.name,
+            [
+                (Field::AccessKeyId, Some(&req.access_key_id)),
+                (Field::SecretAccessKey, Some(&req.secret_access_key)),
+            ],
+            &req.profile_name,
+            &req.region,
+            req.mfa_device.as_deref(),
+        )?;
+        let Valid {
+            name,
+            keys,
+            profile,
+            mfa_device,
+        } = valid;
+        // Create gives both keys, so `validate` returns both as `Some`.
+        let [access_key_id, secret_access_key] = keys.map(Option::unwrap_or_default);
 
         let id = Uuid::new_v4();
         let secrets = &self.config.secrets;
@@ -98,18 +98,7 @@ impl Leapp {
 
             let mut state = self.state.lock().unwrap();
             let mut next = state.ws.clone();
-            let profile_id = match next.profiles.iter().find(|p| p.name == profile) {
-                Some(p) => p.id,
-                None => {
-                    let p = NamedProfile {
-                        id: Uuid::new_v4(),
-                        name: profile.to_string(),
-                    };
-                    let pid = p.id;
-                    next.profiles.push(p);
-                    pid
-                }
-            };
+            let profile_id = profile_id_for(&mut next, profile);
             next.sessions.push(Session {
                 id,
                 name: name.to_string(),
@@ -134,6 +123,69 @@ impl Leapp {
         }
         Ok(id)
     }
+}
+
+/// The checked fields of a create or edit request. A key is `None` only if the request gave
+/// none (edit: keep the old key).
+struct Valid<'a> {
+    name: &'a str,
+    keys: [Option<&'a str>; 2],
+    profile: &'a str,
+    mfa_device: Option<String>,
+}
+
+/// The validation of `create_iam_user` and `update_iam_user`, in the order of the form fields.
+/// A key given as `None` is not checked; a key given as `Some` must not be empty.
+fn validate<'a>(
+    name: &'a str,
+    keys: [(Field, Option<&'a str>); 2],
+    profile: &'a str,
+    region: &str,
+    mfa_device: Option<&str>,
+) -> Result<Valid<'a>> {
+    let name = required(Field::Name, name)?;
+    let [(f0, k0), (f1, k1)] = keys;
+    let keys = [
+        k0.map(|k| required(f0, k)).transpose()?,
+        k1.map(|k| required(f1, k)).transpose()?,
+    ];
+    let profile = required(Field::Profile, profile)?;
+    if profile.contains(['[', ']', '\n', '\r']) {
+        return Err(Error::InvalidInput {
+            field: Field::Profile,
+            message: "must not contain [, ], or line breaks".into(),
+        });
+    }
+    if !regions::REGIONS.contains(&region) {
+        return Err(Error::InvalidInput {
+            field: Field::Region,
+            message: format!("unknown region \"{region}\""),
+        });
+    }
+    let mfa_device = mfa_device
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string);
+    Ok(Valid {
+        name,
+        keys,
+        profile,
+        mfa_device,
+    })
+}
+
+/// The id of the named profile `name`. Adds the profile to `ws` if it is not there.
+fn profile_id_for(ws: &mut Workspace, name: &str) -> Uuid {
+    if let Some(p) = ws.profiles.iter().find(|p| p.name == name) {
+        return p.id;
+    }
+    let p = NamedProfile {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+    };
+    let id = p.id;
+    ws.profiles.push(p);
+    id
 }
 
 fn required(field: Field, value: &str) -> Result<&str> {

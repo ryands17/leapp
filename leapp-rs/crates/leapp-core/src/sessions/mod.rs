@@ -1,5 +1,6 @@
 //! Start and stop of sessions (spec 10.1, 10.2).
 
+mod edit;
 mod iam_user;
 
 use iam_user::Issued;
@@ -53,7 +54,9 @@ impl Leapp {
         for other in to_stop {
             self.stop(other).await?;
         }
-        {
+        // An edit is refused while the session is `Pending`, so the keys cannot change between
+        // here and the key read of this start.
+        let key_generation = {
             let mut state = self.state.lock().unwrap();
             if state.closing {
                 return Err(Error::Closing);
@@ -62,7 +65,8 @@ impl Leapp {
                 return Err(pending_error());
             }
             set_status(&mut state.ws, id, SessionStatus::Pending);
-        }
+            key_generation(&state, id)
+        };
 
         match self.activate(id, &profile, consent_carried).await {
             Ok(fresh) => {
@@ -71,7 +75,7 @@ impl Leapp {
                 if let Some(temp) = fresh
                     && self.account_missing(id)
                 {
-                    self.store_account(id, &temp).await;
+                    self.store_account(id, &temp, key_generation).await;
                 }
                 Ok(())
             }
@@ -584,6 +588,10 @@ fn releasing_error(profile: &str) -> Error {
     Error::ProfilePending(format!(
         "Another session with the named profile \"{profile}\" is stopping"
     ))
+}
+
+fn key_generation(state: &State, id: SessionId) -> u64 {
+    state.key_generation.get(&id).copied().unwrap_or(0)
 }
 
 fn set_status(ws: &mut Workspace, id: SessionId, status: SessionStatus) {

@@ -149,9 +149,15 @@ impl Leapp {
     }
 
     /// Asks AWS for the account number with the temporary credentials and saves it, if the
-    /// session still has none. Any failure is dropped: the start already succeeded (F1-R5).
-    /// No lock is held during the call.
-    pub(crate) async fn store_account(&self, id: SessionId, temp: &SectionBody) {
+    /// session still has none and its keys did not change since the start (`key_generation`).
+    /// Any failure is dropped: the start already succeeded (F1-R5). No lock is held during the
+    /// call.
+    pub(crate) async fn store_account(
+        &self,
+        id: SessionId,
+        temp: &SectionBody,
+        key_generation: u64,
+    ) {
         if self.state.lock().unwrap().closing {
             return;
         }
@@ -171,7 +177,7 @@ impl Leapp {
             return;
         }
         let mut state = self.state.lock().unwrap();
-        if state.closing {
+        if state.closing || super::key_generation(&state, id) != key_generation {
             return;
         }
         let mut next = state.ws.clone();
