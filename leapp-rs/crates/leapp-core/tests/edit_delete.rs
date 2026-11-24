@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{FlakyStore, Harness};
+use common::{FlakyStore, Harness, block_on};
 use leapp_core::{Error, Field, IamUserUpdate, SessionId, SessionKind, SessionStatus};
 
 const MINE: &str = "[default]\naws_access_key_id = MYKEY\naws_secret_access_key = MYSECRET\n";
@@ -331,15 +331,6 @@ async fn an_account_fetched_with_the_old_keys_is_not_saved_after_an_edit_of_the_
     assert!(!h.workspace_text().contains("111111111111"));
 }
 
-/// Runs `fut` on a new runtime on this thread.
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(fut)
-}
-
 /// An edit writes the new keys to the keychain before it saves. A start in that window would
 /// read the new access key with the old secret and cache a token that the keychain and the
 /// workspace do not show. The edit reserves the session, so such a start is refused.
@@ -488,4 +479,141 @@ async fn delete_of_an_unknown_session_is_not_found() {
     let id = uuid::Uuid::new_v4();
     let r = h.leapp.delete_session(id).await;
     assert!(matches!(r, Err(Error::NotFound(x)) if x == id), "{r:?}");
+}
+
+/// A delete while an edit has the session reserved must wait for the edit: else the edit puts
+/// the old keys back under the deleted session, and the user's long-lived keys stay in the
+/// keychain with no session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_while_an_edit_changes_the_keys_is_refused() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+
+    // The edit reads the old keys without the lock; that read waits at the gate.
+    let gate = store.block_get(&format!("iam-user-{id}-access-key-id"));
+    let mut req = same_as_now(&h, id);
+    req.access_key_id = Some("AKID-NEW".into());
+    req.secret_access_key = Some("SECRET-NEW".into());
+    let leapp = &h.leapp;
+    let (deleted, edited) = std::thread::scope(|scope| {
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(id, req)));
+        gate.wait_blocked();
+
+        let deleted = scope
+            .spawn(|| block_on(leapp.delete_session(id)))
+            .join()
+            .unwrap();
+
+        gate.open();
+        (deleted, editor.join().unwrap())
+    });
+
+    assert!(
+        matches!(deleted, Err(Error::ProfilePending(_))),
+        "{deleted:?}"
+    );
+    edited.unwrap();
+    assert!(h.leapp.workspace().session(id).is_some());
+    let secrets = h.secrets.snapshot();
+    assert_eq!(
+        secrets
+            .get(&format!("iam-user-{id}-access-key-id"))
+            .map(String::as_str),
+        Some("AKID-NEW")
+    );
+    assert_eq!(
+        secrets
+            .get(&format!("iam-user-{id}-secret-access-key"))
+            .map(String::as_str),
+        Some("SECRET-NEW")
+    );
+}
+
+/// The edit reserves the session after the delete checked for a reservation: while the stop of
+/// the delete deletes the user's backup. The delete must see the reservation in the critical
+/// section that removes the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_refuses_an_edit_that_began_during_its_stop() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    h.leapp.start(id).await.unwrap();
+
+    // The stop of the delete waits at the delete of the backup, after the session is `Inactive`.
+    let stop_gate = store.block_delete("aws-profile-backup-default");
+    // The edit waits at its read of the old keys, with the session reserved.
+    let edit_gate = store.block_get(&format!("iam-user-{id}-access-key-id"));
+    let mut req = same_as_now(&h, id);
+    req.access_key_id = Some("AKID-NEW".into());
+    req.secret_access_key = Some("SECRET-NEW".into());
+    let leapp = &h.leapp;
+    let (deleted, edited) = std::thread::scope(|scope| {
+        let deleter = scope.spawn(|| block_on(leapp.delete_session(id)));
+        stop_gate.wait_blocked();
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(id, req)));
+        edit_gate.wait_blocked();
+
+        stop_gate.open();
+        let deleted = deleter.join().unwrap();
+        edit_gate.open();
+        (deleted, editor.join().unwrap())
+    });
+
+    assert!(
+        matches!(deleted, Err(Error::ProfilePending(_))),
+        "{deleted:?}"
+    );
+    edited.unwrap();
+    // The stop of the delete completed: the user's section is back.
+    assert_eq!(h.credentials_text().as_deref(), Some(MINE));
+    assert!(h.leapp.workspace().session(id).is_some());
+    assert_eq!(
+        h.secrets
+            .snapshot()
+            .get(&format!("iam-user-{id}-access-key-id"))
+            .map(String::as_str),
+        Some("AKID-NEW")
+    );
+}
+
+/// The second key write of an edit fails: the first new key goes out again, the old keys are
+/// back, and the session is as it was.
+#[tokio::test]
+async fn an_edit_whose_key_write_fails_puts_the_old_keys_back() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    let before = h.workspace_text();
+
+    // The write of the new access key works; the write of the new secret fails.
+    store.fail_set_after(1);
+    let mut req = same_as_now(&h, id);
+    req.name = "renamed".into();
+    req.access_key_id = Some("AKID-NEW".into());
+    req.secret_access_key = Some("SECRET-NEW".into());
+    let edited = h.leapp.update_iam_user(id, req).await;
+
+    assert!(matches!(edited, Err(Error::Secret(_))), "{edited:?}");
+    let secrets = h.secrets.snapshot();
+    let key = |k: &str| secrets.get(&format!("iam-user-{id}-{k}")).cloned();
+    assert_eq!(key("access-key-id").as_deref(), Some("AKID-dev"));
+    assert_eq!(key("secret-access-key").as_deref(), Some("SECRET-dev"));
+    assert_eq!(h.workspace_text(), before);
+    assert_eq!(h.leapp.workspace().session(id).unwrap().name, "dev");
+    // The session still starts, with the old keys.
+    h.leapp.start(id).await.unwrap();
+    let call = h.fake.requests().into_iter().next().unwrap();
+    assert_eq!(call.access_key_id.as_deref(), Some("AKID-dev"));
 }

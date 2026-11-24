@@ -215,12 +215,19 @@ impl Leapp {
 
     /// Deletes a session (spec 10.3 without the chained cascade and pins, F1-R9): stops it if it
     /// is `Active`, saves the workspace without it, then deletes its keychain keys. A failed key
-    /// delete is dropped (F1-R6). A `Pending` session returns `Error::ProfilePending` and stays.
+    /// delete is dropped (F1-R6). A `Pending` session, or one that an edit has reserved, returns
+    /// `Error::ProfilePending` and stays.
     /// If the stop finds the user's backup missing, the delete completes and then returns
     /// `Error::BackupMissing` (F1-R8).
     ///
     /// This function does blocking file and keychain I/O. Call it from a task that may block.
     pub async fn delete_session(&self, id: SessionId) -> Result<()> {
+        // An edit that has the session reserved may put keys back under its UUID after the
+        // delete: they would stay in the keychain with no session. The check in the critical
+        // section below is the one that counts; this one only spares the stop.
+        if self.state.lock().unwrap().editing.contains(&id) {
+            return Err(editing_error());
+        }
         // `stop` returns `NotFound` and `ProfilePending` itself, and does nothing if `Inactive`.
         let backup_missing = match self.stop(id).await {
             Ok(()) => None,
@@ -233,6 +240,9 @@ impl Leapp {
                 None => return Err(Error::NotFound(id)),
                 Some(s) if s.status != SessionStatus::Inactive => return Err(changed_meanwhile()),
                 Some(_) => {}
+            }
+            if state.editing.contains(&id) {
+                return Err(editing_error());
             }
             let mut next = state.ws.clone();
             next.sessions.retain(|s| s.id != id);
