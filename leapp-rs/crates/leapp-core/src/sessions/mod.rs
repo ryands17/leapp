@@ -128,7 +128,9 @@ impl Leapp {
         {
             Ok(()) => Refresh::Done,
             Err(e) => {
-                let closing = matches!(e, Error::Closing);
+                // After `shutdown` began, any error is `Closing`: `shutdown` cleans up the
+                // profile, so no release here and no failure for the user.
+                let closing = matches!(e, Error::Closing) || self.state.lock().unwrap().closing;
                 // `shutdown` releases the profile itself.
                 let released = if closing {
                     Ok(())
@@ -452,6 +454,8 @@ impl Leapp {
         };
 
         let mut state = self.state.lock().unwrap();
+        // This is the check that counts: it is in the critical section that writes. The
+        // `closing` checks before it only end a start early.
         // `shutdown` cleaned up while we waited. Nothing is written yet, so the new backup (if
         // any) is a copy of the section that is still in the file and may go.
         if state.closing {

@@ -73,6 +73,10 @@ impl Leapp {
         // No lock is held here: the prompter may wait for the user.
         let token_code = match mfa {
             Some(serial) => {
+                // After `shutdown` began, no question: the app is closing.
+                if self.state.lock().unwrap().closing {
+                    return Err(Error::Closing);
+                }
                 let code = self
                     .config
                     .prompter
@@ -103,8 +107,9 @@ impl Leapp {
             .credentials()
             .ok_or_else(|| Error::Aws("AWS returned no credentials".into()))?;
         let expiration = credentials.expiration();
-        let expiration = Timestamp::new(expiration.secs(), expiration.subsec_nanos() as i32)
-            .map_err(|_| Error::Aws("AWS returned an invalid expiration time".into()))?;
+        let invalid = || Error::Aws("AWS returned an invalid expiration time".into());
+        let nanos = i32::try_from(expiration.subsec_nanos()).map_err(|_| invalid())?;
+        let expiration = Timestamp::new(expiration.secs(), nanos).map_err(|_| invalid())?;
         let token = CachedToken {
             access_key_id: credentials.access_key_id().trim().to_string(),
             secret_access_key: credentials.secret_access_key().trim().to_string(),

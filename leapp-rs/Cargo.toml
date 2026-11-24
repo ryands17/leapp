@@ -13,7 +13,7 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "3d4e2dfcecb71890f
 tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
-jiff = { version = "1", features = ["serde"] }
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
 axum = "0.8"
 keyring = { version = "3", features = ["apple-native"] }
 serde = { version = "1", features = ["derive"] }

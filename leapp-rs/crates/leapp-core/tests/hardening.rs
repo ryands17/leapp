@@ -216,3 +216,30 @@ async fn an_aws_error_with_an_empty_message_shows_the_full_error() {
         other => panic!("expected Error::Aws, got {other:?}"),
     }
 }
+
+/// After a crash, `startup` finds a managed profile whose backup is gone. It removes our section,
+/// completes, and returns `Error::BackupMissing`, which the app shows at startup.
+#[tokio::test]
+async fn startup_with_a_missing_backup_says_so() {
+    let h = Harness::new().await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
+    let id = h
+        .leapp
+        .create_iam_user(h.iam_user("dev", "default"))
+        .unwrap();
+    h.leapp.start(id).await.unwrap();
+    h.secrets.delete(BACKUP_KEY).unwrap();
+
+    let h = h.reopen();
+    let cleaned = h.leapp.startup().await;
+
+    assert!(
+        matches!(&cleaned, Err(Error::BackupMissing(p)) if p == "default"),
+        "{cleaned:?}"
+    );
+    let ws = h.leapp.workspace();
+    assert_eq!(ws.session(id).unwrap().status, SessionStatus::Inactive);
+    assert!(ws.managed_profiles.is_empty());
+    assert!(!h.credentials_text().unwrap().contains("[default]"));
+}

@@ -32,7 +32,8 @@ pub fn spawn_refresh_loop(
             let leapp = leapp.clone();
             match ticks.spawn(async move { leapp.refresh_tick().await }).await {
                 Ok(report) => send_report(&bridge, &report),
-                // The panic text is not printed: it could hold any value.
+                // This line adds no panic payload: it could hold any value. Rust's default
+                // panic hook still prints the panic message to stderr.
                 Err(e) if e.is_panic() => {
                     eprintln!("leapp-app: a refresh tick panicked; the next tick runs");
                 }

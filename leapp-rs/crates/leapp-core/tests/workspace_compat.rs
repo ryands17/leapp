@@ -2,7 +2,8 @@ mod common;
 
 use common::Harness;
 
-/// A `workspace.json` as the F0 build wrote it: RFC 3339 UTC, nine fractional digits, `Z`.
+/// A `workspace.json` as the F0 build wrote it: RFC 3339 UTC with `Z` and only the fractional
+/// digits the value needs (nine in `start_time`, one in `session_token_expiration`).
 const F0_WORKSPACE: &str = r#"{
   "version": 1,
   "sessions": [

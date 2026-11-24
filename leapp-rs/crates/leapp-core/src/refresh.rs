@@ -25,7 +25,9 @@ impl RefreshReport {
     }
 }
 
-/// A refresh that failed. The session is stopped.
+/// An error of a refresh that failed. The session is `Inactive`. A session can have two entries
+/// in one report: the first is the error of the refresh, the second the error of the release of
+/// its profile (for example `Error::BackupMissing`).
 #[derive(Debug)]
 pub struct RefreshFailure {
     pub session_id: SessionId,

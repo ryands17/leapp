@@ -4,10 +4,11 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{FlakyStore, Harness};
+use common::{FlakyStore, Harness, block_on};
 use jiff::SignedDuration;
 use leapp_core::{
-    IamUserUpdate, REFRESH_TICK, SESSION_DURATION, SessionId, SessionKind, SessionStatus,
+    IamUserUpdate, REFRESH_TICK, SESSION_DURATION, SecretStore, SessionId, SessionKind,
+    SessionStatus,
 };
 
 const DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
@@ -234,15 +235,6 @@ async fn sessions_are_refreshed_one_after_another() {
     assert_eq!(status(&h, b), SessionStatus::Active);
 }
 
-/// Runs `fut` on a new runtime on this thread.
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(fut)
-}
-
 /// An edit reserves the session while it reads and writes keys. A refresh then would set
 /// `Pending` under the edit, so it skips the session this tick (no failure).
 // Multi-thread: the fake AWS server must answer while this thread waits on the scoped threads.
@@ -315,4 +307,37 @@ async fn a_session_in_refresh_is_not_refreshed_again() {
     assert!(second.is_empty(), "{second:?}");
     assert_eq!(first.refreshed, vec![id]);
     assert_eq!(status(&h, id), SessionStatus::Active);
+}
+
+/// A refresh that fails after `shutdown` began is not a failure for the user: `shutdown` cleans
+/// up the profile, and the refresh must not release it a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_that_fails_during_shutdown_reports_nothing() {
+    let store = Arc::new(FlakyStore::default());
+    let (h, clock) = Harness::with_store_and_manual_clock(store.clone()).await;
+    let id = started(&h).await;
+    // The cached token is too old, so the refresh reads the long-lived keys.
+    clock.advance(secs(36001));
+
+    let gate = store.block_get(&format!("iam-user-{id}-access-key-id"));
+    let leapp = &h.leapp;
+    let report = std::thread::scope(|scope| {
+        let refresher = scope.spawn(|| block_on(leapp.refresh_tick()));
+        gate.wait_blocked();
+        // On its own thread: this thread runs the test runtime.
+        scope
+            .spawn(|| block_on(leapp.shutdown()))
+            .join()
+            .unwrap()
+            .unwrap();
+        // The key read after the gate finds no key: the refresh fails with a secret error.
+        h.secrets
+            .delete(&format!("iam-user-{id}-access-key-id"))
+            .unwrap();
+        gate.open();
+        refresher.join().unwrap()
+    });
+
+    assert!(report.is_empty(), "{report:?}");
+    assert_eq!(status(&h, id), SessionStatus::Inactive);
 }
