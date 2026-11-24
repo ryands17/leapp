@@ -1,6 +1,7 @@
 //! The Leapp RS desktop UI: state, view and the bridge to `leapp-core`.
 
 mod bridge;
+mod refresh;
 mod views;
 
 use std::collections::{HashSet, VecDeque};
@@ -14,6 +15,7 @@ use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
 
 pub use bridge::{Bridge, Msg, UiPrompter};
+pub use refresh::spawn_refresh_loop;
 pub use views::create_dialog::{CreateForm, FormMode};
 
 /// A question from core that waits for the user's answer. Dropping it without an answer means
@@ -94,6 +96,8 @@ pub struct Ui {
     menu: Option<RowMenu>,
     /// The open delete confirm, if any.
     delete: Option<DeleteAsk>,
+    /// The background refresh loop. `on_close` stops it.
+    refresh_loop: Option<tokio::task::AbortHandle>,
 }
 
 impl Ui {
@@ -114,7 +118,13 @@ impl Ui {
             starting: HashSet::new(),
             menu: None,
             delete: None,
+            refresh_loop: None,
         }
+    }
+
+    /// Gives the UI the refresh loop (from [`spawn_refresh_loop`]), so that `on_close` stops it.
+    pub fn set_refresh_loop(&mut self, refresh_loop: tokio::task::AbortHandle) {
+        self.refresh_loop = Some(refresh_loop);
     }
 
     /// The workspace as the UI shows it now.
@@ -451,21 +461,37 @@ struct Context {
     leapp: Arc<Leapp>,
     rt: tokio::runtime::Handle,
     bridge: Bridge,
+    refresh_loop: tokio::task::AbortHandle,
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 
 /// Sets what `spec().init` builds the [`Ui`] from. Call it one time, before `rune::run`.
+/// `refresh_loop` is the loop from [`spawn_refresh_loop`]; `on_close` stops it.
 /// Returns false if it was set before (the first values stay).
-pub fn install(leapp: Arc<Leapp>, rt: tokio::runtime::Handle, bridge: Bridge) -> bool {
-    CONTEXT.set(Context { leapp, rt, bridge }).is_ok()
+pub fn install(
+    leapp: Arc<Leapp>,
+    rt: tokio::runtime::Handle,
+    bridge: Bridge,
+    refresh_loop: tokio::task::AbortHandle,
+) -> bool {
+    CONTEXT
+        .set(Context {
+            leapp,
+            rt,
+            bridge,
+            refresh_loop,
+        })
+        .is_ok()
 }
 
 fn init() -> Ui {
     let c = CONTEXT
         .get()
         .expect("call leapp_app::install before rune::run");
-    Ui::new(c.leapp.clone(), c.rt.clone(), c.bridge.clone())
+    let mut ui = Ui::new(c.leapp.clone(), c.rt.clone(), c.bridge.clone());
+    ui.set_refresh_loop(c.refresh_loop.clone());
+    ui
 }
 
 /// A named change to the first state, for headless snapshots (`--scene NAME`).
@@ -500,6 +526,10 @@ fn one_session(s: &mut Ui) {
 /// three). Cleans up the managed profiles, then quits. The UI thread waits for the cleanup: it is
 /// local file and keychain work.
 pub fn on_close(s: &mut Ui, tx: &mut Tx) {
+    // No refresh tick after the quit.
+    if let Some(refresh_loop) = s.refresh_loop.take() {
+        refresh_loop.abort();
+    }
     // Drop the open questions, and the ones still in the bridge: their tasks get no (overwrite)
     // or cancel (MFA) and end, so no start waits for a dialog that is gone. A `Refreshed` or
     // `Failed` message in the bridge is lost too: the app quits now.

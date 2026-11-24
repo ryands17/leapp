@@ -7,10 +7,11 @@ use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use fake_aws::FakeAws;
 use leapp_app::{Bridge, Ui, UiPrompter};
 use leapp_core::SessionId;
-use leapp_core::{Config, Error, Leapp, MemoryStore, NewIamUser, SecretStore};
+use leapp_core::{Clock, Config, Error, Leapp, MemoryStore, NewIamUser, SecretStore};
 use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use tempfile::TempDir;
@@ -28,6 +29,8 @@ pub struct AppHarness {
     /// The secret store of the `Leapp`: `secrets`, and a write can be made to fail.
     pub store: Arc<FlakyStore>,
     pub leapp: Arc<Leapp>,
+    /// The clock of the `Leapp`. It moves only when a test advances it.
+    pub clock: Arc<ManualClock>,
     /// A clone of the Ui's bridge, so tests can send messages.
     pub bridge: Bridge,
     pub rt: Runtime<Ui>,
@@ -54,8 +57,10 @@ impl AppHarness {
         let secrets = store.inner.clone();
         let bridge = Bridge::new();
         let prompter = Arc::new(UiPrompter::new(bridge.clone()));
+        let clock = Arc::new(ManualClock::default());
         let mut config = Config::new(home.path().to_path_buf(), store.clone(), prompter);
         config.endpoints.sts = Some(fake.url());
+        config.clock = clock.clone();
         let leapp = Arc::new(Leapp::open(config).unwrap());
         let out = before(&leapp);
 
@@ -70,6 +75,7 @@ impl AppHarness {
             secrets,
             store,
             leapp,
+            clock,
             bridge,
             rt,
             clipboard,
@@ -98,6 +104,16 @@ impl AppHarness {
         F::Output: Send + 'static,
     {
         self.tokio.spawn(f)
+    }
+
+    /// Starts the app's refresh loop on the harness's tokio runtime, with a tick of 10 ms.
+    pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {
+        leapp_app::spawn_refresh_loop(
+            self.leapp.clone(),
+            self.tokio.handle(),
+            self.bridge.clone(),
+            Duration::from_millis(10),
+        )
     }
 
     /// Blocks every tokio worker until the gate opens (or 10 s), so that no task of the UI or
@@ -340,12 +356,35 @@ pub fn mfa_iam_user(name: &str, profile: &str) -> NewIamUser {
 
 pub const MFA_DEVICE: &str = "arn:aws:iam::123456789012:mfa/dev";
 
+/// A clock that starts at the real time and moves only when a test advances it.
+pub struct ManualClock(Mutex<DateTime<Utc>>);
+
+impl Default for ManualClock {
+    fn default() -> Self {
+        ManualClock(Mutex::new(Utc::now()))
+    }
+}
+
+impl ManualClock {
+    pub fn advance(&self, by: chrono::Duration) {
+        *self.0.lock().unwrap() += by;
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
 /// A `MemoryStore` whose next `set` can be made to fail.
 #[derive(Default)]
 pub struct FlakyStore {
     pub inner: Arc<MemoryStore>,
     fail_next_set: Mutex<bool>,
     hold: Mutex<Option<Gate>>,
+    /// The next `get` of this key panics.
+    panic_on_get: Mutex<Option<String>>,
 }
 
 /// Holds the `set` calls of a `FlakyStore` until `open`.
@@ -375,6 +414,11 @@ impl FlakyStore {
         *self.fail_next_set.lock().unwrap() = true;
     }
 
+    /// The next `get` of `key` panics, one time.
+    pub fn panic_on_next_get(&self, key: &str) {
+        *self.panic_on_get.lock().unwrap() = Some(key.to_string());
+    }
+
     /// Every `set` from now waits until the gate opens.
     pub fn hold_sets(&self) -> Gate {
         let gate = Gate::default();
@@ -385,6 +429,18 @@ impl FlakyStore {
 
 impl SecretStore for FlakyStore {
     fn get(&self, key: &str) -> leapp_core::Result<Option<String>> {
+        let panic = {
+            let mut armed = self.panic_on_get.lock().unwrap();
+            if armed.as_deref() == Some(key) {
+                armed.take()
+            } else {
+                None
+            }
+        };
+        // Panic outside the lock, so the store stays usable.
+        if panic.is_some() {
+            panic!("the test store panics on a get");
+        }
         self.inner.get(key)
     }
 

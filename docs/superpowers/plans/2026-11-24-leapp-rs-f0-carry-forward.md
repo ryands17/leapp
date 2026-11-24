@@ -6,36 +6,44 @@ plans for later features can include them. Each later plan must read its section
 
 ## F1 (IAM user edit/delete, MFA, refresh)
 
-- Keychain backup orphan when you quit during a start. `activate` writes the backup before the
-  STS call, with no `closing` check. At a real quit the runtime drops the start, so
-  `aws-profile-backup-<P>` stays. It equals the user's section, so no data is lost. If the user
-  edits `[P]` first, the next start fails with `BackupConflict`. Fix: check `closing` before the
-  backup write and before the STS call, or let `clean_all` remove orphan backups that are equal to
-  the file section.
-- An STS call is still made after shutdown for a start that already passed the `Pending` check.
-- Put `closing` as a `bool` inside the mutex-guarded state, not as an `AtomicBool` beside the
-  `Mutex` (the type then enforces "only under the lock").
-- Move keychain reads (`stop`, `clean_all`) out of the workspace lock before the refresh loop adds
-  a second writer. A keychain prompt under the lock freezes every render-thread `workspace()` call.
-- `create_iam_user` runs on the render thread (sync keychain). Move it to `Ui::run`.
-- Token cache: no margin before expiry; the expiry path has no test; the cache is not dropped when
-  the base keys change (edit must delete it).
-- `aws_message` passes `Some("")` through.
-- `had_original` with a missing backup removes the section silently. Show an error instead.
-- The second `SecretStore::set` failure path has no test.
-- Local `Pending` can flip to inactive on an early refresh. Add a "starting" set that `refresh`
-  applies again.
-- `to_stop` and the `Pending` check use two lock acquisitions (worst case: a stale "Active" label).
-- Create dialog: field errors clear only on submit; no tests for the `err-access-key`,
-  `err-secret-key` and `err-form` mapping; match fields with an enum, not strings.
-- Region Select popup is narrower than its trigger and hides the Cancel button.
-- Empty state has no "Add session" button.
-- Overwrite dialog: the buttons do not look disabled during the 0.5 s arming delay.
-- Eye toggle on the secret field (spec 14.5), together with the MFA field (ruling R10).
-- `MIN_WINDOW_HEIGHT` (480 px) is not checked against the Create dialog height. Add a test or
-  snapshot of the dialog at the minimum window size (1032x480) before F1 adds the MFA field.
-- The region search test assumes that "eu-w" matches only `eu-west-*` (rune-kit fuzzy match).
-- The region option list is rebuilt on each frame while the dialog is open (about 30 items).
+All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
+
+- Done (`c69761cf`, test `a_start_that_waits_on_aws_at_shutdown_leaves_no_backup`): keychain backup
+  orphan when you quit during a start. A start checks `closing` before the backup write and
+  before the STS call.
+- Done (`c69761cf`, test `a_start_after_shutdown_makes_no_sts_call`): no STS call after shutdown.
+- Done (`c69761cf`): `closing` is a `bool` in the `Mutex<State>`, beside the workspace.
+- Done (`c69761cf`, test `a_stop_does_not_hold_the_lock_while_the_keychain_reads`): `stop` and
+  `clean_all` read the keychain without the workspace lock.
+- Done (`9f5fbe2f`, `30bea513`): the form submit runs `create_iam_user` in `spawn_blocking`, off
+  the render thread, and reports `Msg::FormDone`.
+- Done (`f016249b`, `8f131d86`, `d753febc`): the token cache has a margin
+  (`TOKEN_REUSE_MARGIN`, 1200 s), the expiry path has tests (`tests/token_cache.rs`), and an edit of
+  the keys or the MFA device deletes the cached token.
+- Done (`c69761cf`, test `an_aws_error_with_an_empty_message_shows_the_full_error`): `aws_message`
+  and `Some("")`.
+- Done (`c69761cf`, test `a_stop_with_a_missing_backup_says_so`): a missing backup gives
+  `Error::BackupMissing`.
+- Done (`c69761cf`, test `a_failed_second_secret_write_leaves_no_session_and_no_keys`): the second
+  `SecretStore::set` failure path.
+- Done (`a0cda4fc`): the `Ui` keeps a `starting` set, so a workspace read keeps a starting session
+  `Pending`.
+- Done (`c69761cf`): `stop` reads its target and the `Pending` check under one lock
+  (`stop_target`).
+- Done (`9f5fbe2f`, tests `each_input_error_shows_under_its_field`,
+  `typing_in_a_field_clears_its_error`): field errors clear on edit, and `FieldErrors` matches the
+  core `Field` enum, not strings.
+- Done (`511f6327`, F0): the region field is a `Combobox`; its popup is as wide as its trigger. While
+  it is open, it covers the dialog buttons (a normal popup; a pick closes it).
+- Done (`a0cda4fc`): the empty state has an `Add session` button (`btn-empty-add-session`).
+- Done (`5628104e`): the question buttons are disabled during the arming delay.
+- Done (`9f5fbe2f`, `30bea513`, test `the_eye_shows_the_secret`): eye toggle on the secret field
+  (ruling R10), with the MFA device field.
+- Done (`9f5fbe2f`, test `the_dialog_fits_the_smallest_window`): the Create dialog at 1032x480.
+- Done (Task 9, test file `crates/leapp-app/tests/refresh.rs`): the app refresh loop
+  (`spawn_refresh_loop`, `REFRESH_TICK`).
+- Moved to "Small items": the region search test assumes that "eu-w" matches only `eu-west-*`.
+- Moved to "Small items": the region option list is rebuilt on each frame while the dialog is open.
 
 ## F2 (named profiles)
 
@@ -77,6 +85,11 @@ plans for later features can include them. Each later plan must read its section
   and the real keychain.
 - No test covers the `is_headless()` call site, or the wake at the end of the arming delay.
 - `fake-aws` does not escape XML in error messages.
+- The region search test assumes that "eu-w" matches only `eu-west-*` (rune-kit fuzzy match).
+- The region option list is rebuilt on each frame while the dialog is open (about 30 items).
+- A panic inside a refresh (after `refresh_session` sets `Pending`) leaves the session `Pending`.
+  The app loop survives the panic (test `the_loop_runs_again_after_a_tick_panics`), but no later
+  tick refreshes or frees that session until the next start of the app.
 
 ## Decisions made without the owner (rulings)
 

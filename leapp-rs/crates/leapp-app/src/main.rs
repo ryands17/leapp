@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use leapp_app::{Bridge, Msg, UiPrompter};
-use leapp_core::{Config, KeychainStore, Leapp, MemoryStore, SecretStore};
+use leapp_core::{Config, KeychainStore, Leapp, MemoryStore, REFRESH_TICK, SecretStore};
 use tempfile::TempDir;
 
 /// Where the app keeps its files and secrets for this run.
@@ -69,7 +69,14 @@ fn run() -> Result<(), String> {
         bridge.send(Msg::Failed(e.to_string()));
     }
 
-    if !leapp_app::install(leapp, rt.handle().clone(), bridge) {
+    let refresh_loop =
+        leapp_app::spawn_refresh_loop(leapp.clone(), rt.handle(), bridge.clone(), REFRESH_TICK);
+    if !leapp_app::install(
+        leapp,
+        rt.handle().clone(),
+        bridge,
+        refresh_loop.abort_handle(),
+    ) {
         return Err("bug: leapp_app::install ran two times".into());
     }
     // Closing the window quits. `on_close` also runs for Cmd+Q and the Dock quit.

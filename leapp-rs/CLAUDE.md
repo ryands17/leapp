@@ -52,6 +52,11 @@ Run all commands in `leapp-rs/`.
   a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
+- F1 keys: `row-menu-<id>` (the `⋯` button of a row), `menu-<id>` (its menu), `dlg-mfa`,
+  `fld-mfa-code`, `btn-mfa-submit`, `btn-mfa-cancel`, `dlg-delete`, `btn-delete-yes`,
+  `btn-delete-no`, `btn-secret-eye`, `fld-mfa-device`, `err-mfa-device`, `btn-empty-add-session`.
+- Menu item keys hold an index, not a name. Tests pick an item by its label:
+  `AppHarness::tap_menu_item(id, "Delete session")`.
 - rune-kit `Menu::new(k)` keys its frame `<k>-menu` and its items `<k>-item<i>`. A chosen item does not close the menu: each `on_select` clears the app's open-menu state. `row-` also matches the `row-menu-<id>` buttons: tests list rows with `AppHarness::row_keys`.
 - A revealed secure field (`TextInput::revealed(true)`) stays secure: `has_secure_focus()` is still true and the
   element tree has no text for it. A field's placeholder is only in `rt.accessibility_json()` (`AppHarness::placeholder_of`).
@@ -63,6 +68,12 @@ Run all commands in `leapp-rs/`.
   `main.rs` keeps the `TempDir` alive for the whole run.
 - Rune runs `App::on_close` for the close button, Cmd+Q and the Dock quit, so `leapp_app::on_close`
   calls `Leapp::shutdown` for all of them (`block_on` on the UI thread). `on_quit` is not used.
+- Core has no timer. `main.rs` starts `leapp_app::spawn_refresh_loop` with `REFRESH_TICK` (10 s)
+  after `startup`. Each tick runs in its own task (a panic ends only that tick). `on_close` aborts
+  the loop. Two errors of one session in one tick go in one toast message, joined with `; `.
+- The harness `Leapp` uses a `ManualClock` (`h.clock.advance(..)`, in `tests/common`; core's own
+  test clock is not exported). `fake-aws` sets token expiry from the real time, so advance 36001 s
+  to expire a token. `h.spawn_refresh_loop()` runs the loop with a 10 ms tick.
 - If the keychain asks for a password at every build, the debug binary has a new signature each time.
   Sign it with an Apple Development certificate:
   `codesign -s "Apple Development: <name>" target/debug/leapp-app` (run it after each build).
