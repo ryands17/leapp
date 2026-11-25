@@ -102,6 +102,8 @@ impl Leapp {
                 .map_or_else(|| session.name.clone(), |s| s.name.clone());
             return Err(Error::ChainLoop(name));
         }
+        // The first session of `seen` is the one that was started; the others are its parents.
+        let own_start = seen.is_empty();
         seen.push(session.id);
         let SessionKind::IamRoleChained {
             role_arn,
@@ -110,7 +112,9 @@ impl Leapp {
             external_id,
         } = &session.kind
         else {
-            return self.iam_user_credentials(session).await;
+            // A parent's new token is kept by `save_parent_token` below, under the key
+            // generation check; only the session's own start keeps it at once.
+            return self.iam_user_credentials(session, own_start).await;
         };
 
         // The key generation is taken with the parent, before its keys are read (F23-R7).
@@ -126,10 +130,15 @@ impl Leapp {
         };
         // No lock is held here: the parent may ask for an MFA code.
         let parent_issued = Box::pin(self.session_credentials(&parent, seen)).await?;
-        // A new parent token is saved on the parent, so that the next chained start and the
+        // A new parent token is kept on the parent, so that the next chained start and the
         // parent's own start reuse it (F23-R7). A chained parent has no token cache (F23-R8).
         if parent_issued.fresh {
-            self.save_parent_token(parent.id, parent_issued.expiration, parent_key_generation);
+            self.save_parent_token(
+                parent.id,
+                &parent_issued.body,
+                parent_issued.expiration,
+                parent_key_generation,
+            );
         }
         let parent_keys = parent_issued.body;
 

@@ -40,10 +40,16 @@ struct CachedToken {
 }
 
 impl Leapp {
-    /// Temporary credentials for the session, and when they expire.
-    pub(crate) async fn iam_user_credentials(&self, session: &Session) -> Result<Issued> {
+    /// Temporary credentials for the session, and when they expire. With `keep_token`, a new
+    /// token goes in the keychain here (the session's own start). A chained start passes `false`
+    /// and keeps the token with `save_parent_token`, under the key generation check.
+    pub(crate) async fn iam_user_credentials(
+        &self,
+        session: &Session,
+        keep_token: bool,
+    ) -> Result<Issued> {
         let secrets = &self.config.secrets;
-        let token_key = format!("iam-user-{}-session-token", session.id);
+        let token_key = token_key(session.id);
         let region = session_region(session);
 
         if let Some(expiration) = session.session_token_expiration
@@ -111,7 +117,9 @@ impl Leapp {
             secret_access_key: credentials.secret_access_key().trim().to_string(),
             session_token: credentials.session_token().trim().to_string(),
         };
-        secrets.set(&token_key, &serde_json::to_string(&token)?)?;
+        if keep_token {
+            secrets.set(&token_key, &serde_json::to_string(&token)?)?;
+        }
         Ok(Issued {
             body: body(token, region),
             expiration,
@@ -197,33 +205,58 @@ impl Leapp {
         }
     }
 
-    /// Saves the expiration of a new token of `parent` that a chained start got (F23-R7), so
-    /// that the cached token in the keychain is reused. It saves only if the parent's keys did
-    /// not change since the caller took `key_generation` (before it read the keys): a token of
-    /// the old keys must not be reused with the new ones (F1-R4). Any failure is dropped: the
-    /// next start gets a new token (F1-R5). The status and profile of the parent do not change.
+    /// Keeps a new token of `parent` that a chained start got (F23-R7): writes it to the
+    /// keychain and saves its expiration, so that the next start reuses it. It does both only if
+    /// the parent's keys and MFA device did not change since the caller took `key_generation`
+    /// (before it read the keys), in the same critical section as that check: a token of the old
+    /// keys must never replace or be reused as a token of the new ones (F1-R4). Any failure is
+    /// dropped: the next start gets a new token (F1-R5). The status and profile of the parent do
+    /// not change.
     pub(crate) fn save_parent_token(
         &self,
         parent: SessionId,
+        token: &SectionBody,
         expiration: Timestamp,
         key_generation: u64,
     ) {
+        // The keychain write is under the lock, so that an edit cannot end between the check
+        // and the write. No `.await` follows while the lock is held.
         let mut state = self.state.lock().unwrap();
         if state.closing || super::key_generation(&state, parent) != key_generation {
+            return;
+        }
+        if !state
+            .ws
+            .session(parent)
+            .is_some_and(|s| matches!(s.kind, SessionKind::IamUser { .. }))
+        {
+            return;
+        }
+        let cached = CachedToken {
+            access_key_id: token.access_key_id.clone(),
+            secret_access_key: token.secret_access_key.clone(),
+            session_token: token.session_token.clone(),
+        };
+        let Ok(json) = serde_json::to_string(&cached) else {
+            return;
+        };
+        if self.config.secrets.set(&token_key(parent), &json).is_err() {
             return;
         }
         let mut next = state.ws.clone();
         let Some(session) = next.sessions.iter_mut().find(|s| s.id == parent) else {
             return;
         };
-        if !matches!(session.kind, SessionKind::IamUser { .. }) {
-            return;
-        }
         session.session_token_expiration = Some(expiration);
         if crate::store::save(&self.workspace_path, &next).is_ok() {
             state.ws = next;
         }
     }
+}
+
+/// The keychain key of the cached `GetSessionToken` token of an IAM User session.
+fn token_key(id: SessionId) -> String {
+    format!("iam-user-{id}-session-token")
 }
 
 fn body(token: CachedToken, region: String) -> SectionBody {

@@ -568,29 +568,45 @@ async fn a_refresh_skips_a_chained_session_whose_parent_is_edited() {
     );
 }
 
+/// Starts the chained session `c` and, while the `GetSessionToken` answer of its parent waits
+/// 3 s at the fake AWS, runs `during` on another thread. So the start has read the parent's keys
+/// and key generation before `during`, and gets its parent token after `during`. The keychain
+/// write of that token cannot be the gate: it is under the state lock, or does not occur. Fails
+/// if the start fails, or if it ended before `during` (no race was made).
+fn start_while_the_parent_token_waits(h: &Harness, c: SessionId, during: impl FnOnce() + Send) {
+    h.fake
+        .delay_next("GetSessionToken", std::time::Duration::from_secs(3));
+    let leapp = &h.leapp;
+    let fake = &h.fake;
+    let (started, during_ended_first) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| block_on(leapp.start(c)));
+        let sent = std::time::Instant::now();
+        while fake.count("GetSessionToken") == 0 {
+            assert!(sent.elapsed().as_secs() < 5, "no GetSessionToken came");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        scope.spawn(during).join().unwrap();
+        let during_ended_first = !starter.is_finished();
+        (starter.join().unwrap(), during_ended_first)
+    });
+    assert!(
+        during_ended_first,
+        "the chained start ended first: the test did not make the race"
+    );
+    started.unwrap();
+}
+
 /// A chained start gets a new parent token with the old keys; an edit of the parent's keys (or
-/// MFA device) ends before the start saves that token. The token must not be reused after the
+/// MFA device) ends before the start keeps that token. The token must not be reused after the
 /// edit (F1-R4): the next start gets a new one. With `new_device`, the next start asks for the
 /// code of the new device.
 async fn a_parent_token_from_before_an_edit_is_not_reused(edit: IamUserUpdate, new_device: bool) {
-    let store = Arc::new(FlakyStore::default());
-    let h = Harness::with_store(store.clone()).await;
+    let h = Harness::new().await;
     let (p, c) = parent_and_child(&h, |_| {});
 
-    // The chained start has its parent token from AWS; the keychain write of it waits.
-    let gate = store.block_set(&format!("iam-user-{p}-session-token"));
-    let leapp = &h.leapp;
-    let (started, edited) = std::thread::scope(|scope| {
-        let starter = scope.spawn(|| block_on(leapp.start(c)));
-        gate.wait_blocked();
-
-        let edited = within_time(scope, &gate, || block_on(leapp.update_iam_user(p, edit)));
-
-        gate.open();
-        (starter.join().unwrap(), edited)
+    start_while_the_parent_token_waits(&h, c, || {
+        block_on(h.leapp.update_iam_user(p, edit)).unwrap();
     });
-    edited.unwrap();
-    started.unwrap();
     assert_eq!(expiration(&h, p), None);
 
     h.prompter.mfa_answers(vec![Some("123456")]);
@@ -604,6 +620,7 @@ async fn a_parent_token_from_before_an_edit_is_not_reused(edit: IamUserUpdate, n
     assert_eq!(h.prompter.mfa_asked(), asked);
 }
 
+// Multi-thread: the fake AWS server must answer while this thread waits on the scoped threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_token_from_before_a_key_edit_is_not_reused() {
     a_parent_token_from_before_an_edit_is_not_reused(new_keys_for_p(None), false).await;
@@ -615,6 +632,35 @@ async fn a_parent_token_from_before_an_mfa_edit_is_not_reused() {
     edit.access_key_id = None;
     edit.secret_access_key = None;
     a_parent_token_from_before_an_edit_is_not_reused(edit, true).await;
+}
+
+/// A chained start gets a parent token with the old keys. Before it can keep that token, an edit
+/// of the parent ends and the parent's own start keeps a token of the new keys. The late token of
+/// the old keys must not replace it: the next start of the parent reuses the new-keys token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_parent_token_from_before_an_edit_does_not_replace_a_newer_token() {
+    let h = Harness::new().await;
+    let (p, c) = parent_and_child(&h, |_| {});
+
+    start_while_the_parent_token_waits(&h, c, || {
+        block_on(h.leapp.update_iam_user(p, new_keys_for_p(None))).unwrap();
+        block_on(h.leapp.start(p)).unwrap();
+    });
+    assert_eq!(
+        token_call_keys(&h),
+        [Some("AKID-P".to_string()), Some("AKID-NEW".to_string())]
+    );
+
+    // The next start of the parent reuses the token of the new keys.
+    h.leapp.stop(p).await.unwrap();
+    h.leapp.start(p).await.unwrap();
+
+    assert_eq!(h.fake.count("GetSessionToken"), 2);
+    let text = h.credentials_text().unwrap();
+    assert!(
+        text.contains("aws_session_token = fake-token-2"),
+        "the parent uses a token of its old keys"
+    );
 }
 
 /// Changes the `parent_session_id` of `id` in `workspace.json` (a hand edit).
