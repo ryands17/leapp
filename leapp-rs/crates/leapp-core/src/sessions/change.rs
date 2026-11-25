@@ -3,9 +3,10 @@
 
 use super::edit::{Editing, changed_meanwhile};
 use super::{pending_error, pending_on, profile_name};
-use crate::error::{Error, Field, Result};
+use crate::error::{Error, Result};
 use crate::model::{SessionId, SessionStatus, Workspace};
-use crate::{Leapp, check_profile_chars, check_region, profile_id_for, required, store};
+use crate::profiles::empty_profile_name;
+use crate::{Leapp, check_profile_chars, check_region, profile_id_for, store};
 
 impl Leapp {
     /// Moves a session to another region. The same region does nothing (F23-R3). An `Active`
@@ -34,7 +35,10 @@ impl Leapp {
     ///
     /// This function does blocking file and keychain I/O. Call it from a task that may block.
     pub async fn change_profile(&self, id: SessionId, profile: &str) -> Result<()> {
-        let name = required(Field::Profile, profile)?;
+        let name = profile.trim();
+        if name.is_empty() {
+            return Err(empty_profile_name());
+        }
         check_profile_chars(name)?;
         {
             let state = self.state.lock().unwrap();
@@ -65,9 +69,14 @@ impl Leapp {
     ///    (F1-R8).
     /// 3. Under the lock: checks that each session is still there and `Inactive`, applies
     ///    `change` to a copy of the workspace, saves it.
-    /// 4. Drops the reservation and starts again the ones that were `Active`. Returns the first
-    ///    start error, else the missing backup, else `Ok`. A failed start leaves the change saved
-    ///    and the session `Inactive`.
+    /// 4. Drops the reservation and starts again the ones that step 2 stopped.
+    ///
+    /// If step 2 or 3 fails (a stop error that is not a missing backup, a session that changed
+    /// meanwhile, an error of `change`, a failed save), nothing of the change is saved: step 4
+    /// starts again the sessions that were stopped before the failure, ignores the errors of
+    /// those starts, and returns the first failure. Else it returns the first start error, else
+    /// the missing backup, else `Ok`. A failed start after a saved change leaves the change saved
+    /// and the session `Inactive`.
     ///
     /// This function does blocking file and keychain I/O. Call it from a task that may block.
     pub(crate) async fn change_sessions(
@@ -97,38 +106,38 @@ impl Leapp {
             (was_active, reservation)
         };
 
+        let mut stopped = Vec::with_capacity(was_active.len());
         let mut backup_missing = None;
+        let mut failure = None;
         for &id in &was_active {
             match self.stop(id).await {
-                Ok(()) => {}
+                Ok(()) => stopped.push(id),
+                // The stop completed (F1-R8).
                 Err(Error::BackupMissing(p)) => {
                     backup_missing.get_or_insert(p);
+                    stopped.push(id);
                 }
-                Err(e) => return Err(e),
-            }
-        }
-
-        {
-            let mut state = self.state.lock().unwrap();
-            for &id in &ids {
-                match state.ws.session(id) {
-                    None => return Err(Error::NotFound(id)),
-                    Some(s) if s.status != SessionStatus::Inactive => {
-                        return Err(changed_meanwhile());
-                    }
-                    Some(_) => {}
+                Err(e) => {
+                    failure = Some(e);
+                    break;
                 }
             }
-            let mut next = state.ws.clone();
-            change(&mut next)?;
-            store::save(&self.workspace_path, &next)?;
-            state.ws = next;
+        }
+        if failure.is_none() {
+            failure = self.save_change(&ids, change).err();
         }
 
-        // The change is saved; the restarts below are normal starts.
+        // The change is saved or not done at all; the restarts below are normal starts.
         drop(reservation);
+        if let Some(e) = failure {
+            // Best effort: put the sessions back as they were. The failure is the error to show.
+            for &id in &stopped {
+                let _ = self.start(id).await;
+            }
+            return Err(e);
+        }
         let mut first_error = None;
-        for &id in &was_active {
+        for &id in &stopped {
             if let Err(e) = self.start(id).await {
                 first_error.get_or_insert(e);
             }
@@ -138,6 +147,30 @@ impl Leapp {
             (None, Some(p)) => Err(Error::BackupMissing(p)),
             (None, None) => Ok(()),
         }
+    }
+
+    /// Step 3 of `change_sessions`: under the lock, checks that each session of `ids` is still
+    /// there and `Inactive`, applies `change` to a copy of the workspace and saves it.
+    fn save_change(
+        &self,
+        ids: &[SessionId],
+        change: impl FnOnce(&mut Workspace) -> Result<()>,
+    ) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        for &id in ids {
+            match state.ws.session(id) {
+                None => return Err(Error::NotFound(id)),
+                Some(s) if s.status != SessionStatus::Inactive => {
+                    return Err(changed_meanwhile());
+                }
+                Some(_) => {}
+            }
+        }
+        let mut next = state.ws.clone();
+        change(&mut next)?;
+        store::save(&self.workspace_path, &next)?;
+        state.ws = next;
+        Ok(())
     }
 }
 

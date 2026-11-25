@@ -52,6 +52,22 @@ async fn an_f0_workspace_file_still_loads() {
     assert_eq!(dev.session_token_expiration, Some(expiry));
 }
 
+/// T1-m5: a `settings` object without `default_region` loads with the default region.
+#[tokio::test]
+async fn an_empty_settings_object_loads_with_the_defaults() {
+    let h = Harness::new().await;
+    let path = h.workspace_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = F0_WORKSPACE.replacen("\"profiles\": [", "\"settings\": {},\n  \"profiles\": [", 1);
+    assert!(text.contains("\"settings\": {}"), "{text}");
+    std::fs::write(&path, text).unwrap();
+
+    let h = h.reopen();
+    let ws = h.leapp.workspace();
+    assert_eq!(ws.sessions.len(), 1, "the file must load, not move aside");
+    assert_eq!(ws.settings.default_region, "us-east-1");
+}
+
 #[tokio::test]
 async fn the_broken_file_stamp_keeps_its_format() {
     let h = Harness::new().await;

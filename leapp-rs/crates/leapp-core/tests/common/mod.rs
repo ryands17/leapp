@@ -187,6 +187,11 @@ impl Gate {
         assert!(guard.waiting > 0, "no call came to the gate");
     }
 
+    /// Whether a call waits at this gate now. It does not wait.
+    pub fn has_waiters(&self) -> bool {
+        self.0.0.lock().unwrap().waiting > 0
+    }
+
     fn pass(&self) {
         let (state, cv) = &*self.0;
         let mut guard = state.lock().unwrap();

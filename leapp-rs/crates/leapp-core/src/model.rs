@@ -22,7 +22,9 @@ pub struct Workspace {
 }
 
 /// The app settings that are saved in `workspace.json`.
+/// A missing field gets its default (T1-m5).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Settings {
     /// The region that the create forms show first.
     pub default_region: String,

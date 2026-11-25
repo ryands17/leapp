@@ -120,9 +120,14 @@ async fn change_profile_checks_the_name() {
         invalid(h.leapp.change_profile(id, "a]b").await).0,
         Field::Profile
     );
+    // The same message as `create_profile` (T1-m4).
     assert_eq!(
-        invalid(h.leapp.change_profile(id, "  ").await).0,
-        Field::Profile
+        invalid(h.leapp.change_profile(id, "  ").await),
+        (Field::Profile, "Empty profile name".to_string())
+    );
+    assert_eq!(
+        invalid(h.leapp.change_profile(id, "").await),
+        (Field::Profile, "Empty profile name".to_string())
     );
     assert_eq!(
         invalid(h.leapp.change_region(id, "mars-1").await).0,
@@ -286,4 +291,252 @@ async fn the_default_region_setting_is_saved() {
     }));
     assert_eq!(field, Field::Region);
     assert_eq!(h.leapp.workspace().settings.default_region, "eu-west-1");
+}
+
+/// T1-m1: the save of a change fails after the stop. The session that the change stopped is
+/// started again with the old value, and the error of the save is returned.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_whose_save_fails_starts_the_session_again() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    h.write_credentials(MINE);
+    h.prompter.answer(true);
+    let id = active_session(&h, "default", "us-east-1").await;
+    let ws_dir = h.home.path().join(".leapp-rs");
+
+    // The stop of the change waits at the delete of the user's backup, after its own save.
+    let stop_gate = store.block_delete("aws-profile-backup-default");
+    let leapp = &h.leapp;
+    let (changed, restarted) = std::thread::scope(|scope| {
+        let changer = scope.spawn(|| block_on(leapp.change_region(id, "eu-west-1")));
+        stop_gate.wait_blocked();
+        // The save of the change fails: the workspace folder is read-only.
+        common::set_mode(&ws_dir, 0o500);
+        // The restart reads the user's backup (spec 9.3 step 4); it waits here until the folder
+        // is writable again, so that its own saves work.
+        let start_gate = store.block_get("aws-profile-backup-default");
+        stop_gate.open();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !changer.is_finished() && !start_gate.has_waiters() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let restarted = start_gate.has_waiters();
+        common::set_mode(&ws_dir, 0o700);
+        start_gate.open();
+        (changer.join().unwrap(), restarted)
+    });
+
+    assert!(matches!(changed, Err(Error::Io(_))), "{changed:?}");
+    assert!(restarted, "the change did not start the session again");
+    assert_eq!(status(&h, id), SessionStatus::Active);
+    assert_eq!(h.leapp.workspace().session(id).unwrap().region, "us-east-1");
+    assert!(
+        section(&h, "default")
+            .unwrap()
+            .contains("region = us-east-1")
+    );
+    let h = h.reopen();
+    assert_eq!(h.leapp.workspace().session(id).unwrap().region, "us-east-1");
+}
+
+/// The ID of the named profile `name`.
+fn profile_id(h: &Harness, name: &str) -> uuid::Uuid {
+    h.leapp
+        .workspace()
+        .profiles
+        .iter()
+        .find(|p| p.name == name)
+        .unwrap_or_else(|| panic!("no profile {name}"))
+        .id
+}
+
+fn default_cannot_change() -> (Field, String) {
+    (
+        Field::Profile,
+        "the default profile cannot be renamed or deleted".to_string(),
+    )
+}
+
+#[tokio::test]
+async fn rename_of_a_profile_with_an_active_session_moves_its_section() {
+    let h = Harness::new().await;
+    let id = active_session(&h, "dev", "eu-west-1").await;
+    let dev_id = profile_id(&h, "dev");
+    let body = section(&h, "dev").unwrap();
+
+    h.leapp.rename_profile(dev_id, "stage").await.unwrap();
+
+    assert_eq!(section(&h, "dev"), None, "{:?}", h.credentials_text());
+    // F1-R1: the restart reuses the cached token, so the section moves as it is.
+    assert_eq!(section(&h, "stage"), Some(body));
+    assert_eq!(status(&h, id), SessionStatus::Active);
+    assert_eq!(profile_id(&h, "stage"), dev_id);
+    assert_eq!(h.leapp.workspace().session(id).unwrap().profile_id, dev_id);
+    let h = h.reopen();
+    assert_eq!(h.leapp.workspace().profile_name(dev_id), Some("stage"));
+}
+
+/// Review Focus 2.
+#[tokio::test]
+async fn rename_to_a_user_written_section_asks_first() {
+    const STAGE: &str = "[stage]\naws_access_key_id = MYKEY\naws_secret_access_key = MYSECRET\n";
+    let h = Harness::new().await;
+    h.write_credentials(STAGE);
+    let id = active_session(&h, "dev", "eu-west-1").await;
+    let dev_id = profile_id(&h, "dev");
+    assert!(section(&h, "dev").is_some());
+    h.prompter.answer(false);
+
+    let renamed = h.leapp.rename_profile(dev_id, "stage").await;
+
+    assert!(
+        matches!(&renamed, Err(Error::ProfileOverwriteDeclined(p)) if p == "stage"),
+        "{renamed:?}"
+    );
+    assert_eq!(h.prompter.asked(), vec!["stage".to_string()]);
+    assert_eq!(h.leapp.workspace().profile_name(dev_id), Some("stage"));
+    assert_eq!(status(&h, id), SessionStatus::Inactive);
+    // `[dev]` is gone and the user's `[stage]` is byte for byte as they wrote it.
+    assert_eq!(h.credentials_text().as_deref(), Some(STAGE));
+}
+
+#[tokio::test]
+async fn delete_profile_moves_its_sessions_to_default() {
+    let h = Harness::new().await;
+    let active = active_session(&h, "dev", "eu-west-1").await;
+    let other = h.leapp.create_iam_user(h.iam_user("other", "dev")).unwrap();
+    let dev_id = profile_id(&h, "dev");
+    let default_id = profile_id(&h, "default");
+    assert_eq!(h.leapp.workspace().sessions_on(dev_id), 2);
+    assert_eq!(h.leapp.workspace().sessions_on(default_id), 0);
+    let body = section(&h, "dev").unwrap();
+
+    h.leapp.delete_profile(dev_id).await.unwrap();
+
+    let ws = h.leapp.workspace();
+    assert!(!ws.profiles.iter().any(|p| p.name == "dev"), "{ws:?}");
+    assert_eq!(ws.session(active).unwrap().profile_id, default_id);
+    assert_eq!(ws.session(other).unwrap().profile_id, default_id);
+    assert_eq!(ws.sessions_on(default_id), 2);
+    assert_eq!(status(&h, active), SessionStatus::Active);
+    assert_eq!(status(&h, other), SessionStatus::Inactive);
+    assert_eq!(section(&h, "dev"), None);
+    assert_eq!(section(&h, "default"), Some(body));
+    let h = h.reopen();
+    assert!(h.leapp.workspace().profile_name(dev_id).is_none());
+}
+
+#[tokio::test]
+async fn delete_of_a_profile_without_sessions_only_removes_it() {
+    let h = Harness::new().await;
+    let dev_id = h.leapp.create_profile("dev").unwrap();
+    let ws_before = h.leapp.workspace();
+
+    h.leapp.delete_profile(dev_id).await.unwrap();
+
+    let h = h.reopen();
+    let ws = h.leapp.workspace();
+    assert!(ws.profile_name(dev_id).is_none());
+    assert_eq!(ws.profiles.len(), ws_before.profiles.len() - 1);
+}
+
+/// Review Focus 3.
+#[tokio::test]
+async fn a_moved_session_takes_over_default() {
+    let h = Harness::new().await;
+    let a = h.leapp.create_iam_user(h.iam_user("a", "default")).unwrap();
+    h.leapp.start(a).await.unwrap();
+    let b = h.leapp.create_iam_user(h.iam_user("b", "dev")).unwrap();
+    h.leapp.start(b).await.unwrap();
+    let a_body = section(&h, "default").unwrap();
+    let b_body = section(&h, "dev").unwrap();
+    assert_ne!(a_body, b_body);
+
+    h.leapp.delete_profile(profile_id(&h, "dev")).await.unwrap();
+
+    assert_eq!(status(&h, b), SessionStatus::Active);
+    assert_eq!(status(&h, a), SessionStatus::Inactive);
+    assert_eq!(section(&h, "default"), Some(b_body));
+    assert_eq!(section(&h, "dev"), None);
+}
+
+#[tokio::test]
+async fn the_default_profile_cannot_be_renamed_or_deleted() {
+    let h = Harness::new().await;
+    let default_id = profile_id(&h, "default");
+    // The workspace file exists.
+    h.leapp.create_profile("dev").unwrap();
+    let before = h.workspace_text();
+
+    assert_eq!(
+        invalid(h.leapp.rename_profile(default_id, "main").await),
+        default_cannot_change()
+    );
+    assert_eq!(
+        invalid(h.leapp.delete_profile(default_id).await),
+        default_cannot_change()
+    );
+    assert_eq!(h.workspace_text(), before);
+    assert_eq!(
+        h.leapp.workspace().profile_name(default_id),
+        Some("default")
+    );
+}
+
+#[tokio::test]
+async fn rename_checks_the_name() {
+    // The system clock: a restart would give a new `start_time`.
+    let h = Harness::new().await;
+    let id = active_session(&h, "dev", "eu-west-1").await;
+    h.leapp.create_profile("ci").unwrap();
+    let dev_id = profile_id(&h, "dev");
+    let start_time = h.leapp.workspace().session(id).unwrap().start_time;
+    let text = h.credentials_text();
+    let workspace = h.workspace_text();
+
+    let message = |m: &str| (Field::Profile, m.to_string());
+    assert_eq!(
+        invalid(h.leapp.rename_profile(dev_id, "default").await),
+        message("\"default\" is not a valid profile name")
+    );
+    assert_eq!(
+        invalid(h.leapp.rename_profile(dev_id, " ci ").await),
+        message("Profile already exists")
+    );
+    assert_eq!(
+        invalid(h.leapp.rename_profile(dev_id, "  ").await),
+        message("Empty profile name")
+    );
+    assert_eq!(
+        invalid(h.leapp.rename_profile(dev_id, "a]b").await).0,
+        Field::Profile
+    );
+    // F23-R3: the same name does nothing.
+    h.leapp.rename_profile(dev_id, " dev ").await.unwrap();
+
+    assert_eq!(
+        h.leapp.workspace().session(id).unwrap().start_time,
+        start_time
+    );
+    assert_eq!(status(&h, id), SessionStatus::Active);
+    assert_eq!(h.credentials_text(), text);
+    assert_eq!(h.workspace_text(), workspace);
+}
+
+#[tokio::test]
+async fn rename_or_delete_of_an_unknown_profile_fails() {
+    let h = Harness::new().await;
+    let id = uuid::Uuid::new_v4();
+
+    let renamed = h.leapp.rename_profile(id, "x").await;
+    assert!(
+        matches!(renamed, Err(Error::ProfileNotFound(p)) if p == id),
+        "{renamed:?}"
+    );
+    let deleted = h.leapp.delete_profile(id).await;
+    assert!(
+        matches!(deleted, Err(Error::ProfileNotFound(p)) if p == id),
+        "{deleted:?}"
+    );
 }

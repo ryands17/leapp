@@ -715,13 +715,13 @@ fn profile_name(ws: &Workspace, profile_id: Uuid) -> Result<String> {
         })
 }
 
-fn pending_on(ws: &Workspace, profile_id: Uuid) -> bool {
+pub(crate) fn pending_on(ws: &Workspace, profile_id: Uuid) -> bool {
     ws.sessions
         .iter()
         .any(|s| s.profile_id == profile_id && s.status == SessionStatus::Pending)
 }
 
-fn pending_error() -> Error {
+pub(crate) fn pending_error() -> Error {
     Error::ProfilePending("Another session with the same named profile is starting".into())
 }
 
