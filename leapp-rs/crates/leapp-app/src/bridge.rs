@@ -38,6 +38,11 @@ pub enum Msg {
         token: u64,
         result: Result<(), leapp_core::Error>,
     },
+    /// The create of the IAM Role Chained form that it sent with `token` ended.
+    ChainedDone {
+        token: u64,
+        result: Result<(), leapp_core::Error>,
+    },
     /// Core asks for the MFA code of the session named `session`. Send the code, or `None` to
     /// cancel, on `reply`.
     AskMfa {

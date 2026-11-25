@@ -50,7 +50,7 @@ fn search_profiles(h: &mut AppHarness, text: &str) {
 #[test]
 fn the_profile_field_lists_the_profiles() {
     let mut h = with_dev_profile();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert!(h.has("sel-profile"));
     assert!(
         shows(&h, "sel-profile-value-trigger", "default"),
@@ -71,7 +71,7 @@ fn the_profile_field_lists_the_profiles() {
 #[test]
 fn a_new_profile_name_can_be_typed() {
     let mut h = with_dev_profile();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     search_profiles(&mut h, "stage");
 
     assert!(
@@ -96,7 +96,7 @@ fn a_new_profile_name_can_be_typed() {
 #[test]
 fn the_new_name_is_trimmed() {
     let mut h = with_dev_profile();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     search_profiles(&mut h, "  stage ");
     h.press(Key::Enter);
     assert_eq!(h.rt.state.create_form().profile(), "stage");
@@ -105,7 +105,7 @@ fn the_new_name_is_trimmed() {
 #[test]
 fn an_existing_name_offers_no_create_option() {
     let mut h = with_dev_profile();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     search_profiles(&mut h, "dev");
 
     assert!(h.has("sel-profile-option-dev"));
@@ -120,7 +120,7 @@ fn the_form_preselects_the_default_region() {
         })
         .unwrap()
     });
-    h.tap("btn-create");
+    h.open_iam_user_form();
 
     assert_eq!(h.rt.state.create_form().region(), "eu-west-1");
     assert!(shows(&h, "sel-region-value-trigger", "eu-west-1"));

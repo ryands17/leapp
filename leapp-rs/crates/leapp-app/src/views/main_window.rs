@@ -101,7 +101,7 @@ fn toolbar(k: &Kit) -> El {
     let create = IconButton::new(&PLUS_CIRCLE)
         .variant(IconButtonVariant::Ghost)
         .label("Add session")
-        .on_press(super::create_dialog::open)
+        .on_press(super::type_chooser::open)
         .build(k)
         .key("btn-create");
     let settings = IconButton::new(&super::settings_dialog::GEAR)
@@ -134,7 +134,7 @@ fn empty_state(k: &Kit) -> El {
         )
         .child(
             Button::new("Add session")
-                .on_press(super::create_dialog::open)
+                .on_press(super::type_chooser::open)
                 .build(k)
                 .key("btn-empty-add-session"),
         )
@@ -210,7 +210,7 @@ fn session_row(ws: &Workspace, s: &Session, menu: El, k: &Kit) -> El {
     let provider = chip(
         format!("cell-provider-{id}"),
         provider_label(&s.kind),
-        orange(),
+        provider_color(&s.kind),
         10.0,
         k,
     );
@@ -257,6 +257,14 @@ fn provider_label(kind: &SessionKind) -> &'static str {
     match kind {
         SessionKind::IamUser { .. } => "IAM User",
         SessionKind::IamRoleChained { .. } => "IAM Role Chained",
+    }
+}
+
+/// Leapp's chip colour of each provider: IAM User orange, IAM Role Chained purple.
+fn provider_color(kind: &SessionKind) -> Color {
+    match kind {
+        SessionKind::IamUser { .. } => orange(),
+        SessionKind::IamRoleChained { .. } => super::chained_dialog::purple(),
     }
 }
 

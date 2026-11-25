@@ -162,6 +162,8 @@ fn the_empty_state_has_an_add_session_button() {
     assert!(!h.has("dlg-iam-user"));
 
     h.tap("btn-empty-add-session");
+    assert!(h.has("dlg-choose-type"), "the type chooser is open");
+    h.tap("btn-type-iam-user");
 
     assert!(h.has("dlg-iam-user"), "the create form is open");
     assert!(h.rt.state.create_form().is_open());

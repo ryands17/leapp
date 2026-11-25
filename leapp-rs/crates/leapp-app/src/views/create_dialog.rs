@@ -92,7 +92,7 @@ impl FieldErrors {
             Field::Profile => &mut self.profile,
             Field::Region => &mut self.region,
             Field::MfaDevice => &mut self.mfa_device,
-            // The IAM User form has none of these fields; Task 9 adds the chained form.
+            // The IAM User form has none of these fields: they are in the chained form.
             Field::ParentSession | Field::RoleArn | Field::RoleSessionName | Field::ExternalId => {
                 &mut self.form
             }

@@ -21,7 +21,7 @@ fn fill(h: &mut AppHarness, name: &str, key_id: &str, secret: &str) {
 fn create_dialog_adds_a_session() {
     let mut h = AppHarness::new();
     assert!(!h.has("dlg-iam-user"));
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert!(h.has("dlg-iam-user"));
 
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
@@ -62,7 +62,7 @@ fn create_dialog_adds_a_session() {
 #[test]
 fn create_is_blocked_until_required_fields_are_set() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("btn-create-submit");
     h.settle_with(|h| h.has("err-name"));
 
@@ -78,7 +78,7 @@ fn create_is_blocked_until_required_fields_are_set() {
 #[test]
 fn a_bad_profile_name_shows_under_the_profile_field() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.tap("sel-profile-value-trigger");
     h.type_text("[bad]");
@@ -97,7 +97,7 @@ fn a_bad_profile_name_shows_under_the_profile_field() {
 #[test]
 fn the_form_starts_with_default_profile_and_region() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert_eq!(h.rt.state.create_form().profile(), "default");
     assert_eq!(h.rt.state.create_form().region(), "us-east-1");
     assert!(h.has("sel-region"));
@@ -106,7 +106,7 @@ fn the_form_starts_with_default_profile_and_region() {
 #[test]
 fn typing_in_the_region_search_shows_only_matching_regions() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("sel-region-value-trigger");
     h.type_text("eu-w");
     h.frames(10);
@@ -126,7 +126,7 @@ fn typing_in_the_region_search_shows_only_matching_regions() {
 #[test]
 fn a_region_found_by_search_is_used() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("sel-region-value-trigger");
     h.type_text("ap-southeast-2");
     h.frames(10);
@@ -143,7 +143,7 @@ fn a_region_found_by_search_is_used() {
 #[test]
 fn enter_in_the_region_search_picks_the_first_match() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("sel-region-value-trigger");
     h.type_text("eu-north-1");
     h.frames(10);
@@ -159,13 +159,13 @@ fn enter_in_the_region_search_picks_the_first_match() {
 #[test]
 fn cancel_closes_the_dialog_and_wipes_the_fields() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.tap("btn-create-cancel");
 
     assert!(!h.has("dlg-iam-user"));
     assert!(h.leapp.workspace().sessions.is_empty());
-    h.tap("btn-create");
+    h.open_iam_user_form();
     let form = h.rt.state.create_form();
     assert!(
         form.is_blank(),
@@ -177,7 +177,7 @@ fn cancel_closes_the_dialog_and_wipes_the_fields() {
 #[test]
 fn the_secret_never_shows_in_the_element_tree() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.frames(2);
 
@@ -192,12 +192,12 @@ fn the_secret_never_shows_in_the_element_tree() {
 #[test]
 fn success_wipes_the_fields() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.tap("btn-create-submit");
     h.settle(|ui| ui.workspace().sessions.len() == 1);
 
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert!(h.rt.state.create_form().is_blank());
     assert!(!h.has("err-name"));
 }
@@ -212,21 +212,21 @@ fn submit_until(h: &mut AppHarness, key: &str) {
 fn each_input_error_shows_under_its_field() {
     // No access key.
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "", "SECRET-dev");
     submit_until(&mut h, "err-access-key");
     assert!(!h.has("err-name") && !h.has("err-secret-key") && !h.has("err-form"));
 
     // No secret key.
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "");
     submit_until(&mut h, "err-secret-key");
     assert!(!h.has("err-access-key") && !h.has("err-form"));
 
     // The secret store fails: the error is not about one field.
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.store.fail_next_set();
     submit_until(&mut h, "err-form");
@@ -239,7 +239,7 @@ fn each_input_error_shows_under_its_field() {
 #[test]
 fn typing_in_a_field_clears_its_error() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     submit_until(&mut h, "err-name");
 
     // An edit of another field does not clear the error of the name.
@@ -281,7 +281,7 @@ fn caret_x(h: &AppHarness, key: &str) -> f32 {
 #[test]
 fn the_eye_shows_the_secret() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("fld-secret-key");
     h.type_text("SECRET-dev");
     h.tap("fld-secret-key");
@@ -334,7 +334,7 @@ fn the_eye_shows_the_secret() {
 #[test]
 fn an_mfa_device_is_saved() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     h.tap("fld-mfa-device");
     h.type_text(common::MFA_DEVICE);
@@ -356,7 +356,7 @@ fn the_dialog_fits_the_smallest_window() {
         .expect("the window has a minimum size");
     h.rt.set_viewport((min_w, min_h), 1.0);
     h.frames(2);
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.frames(30);
 
     for key in ["btn-create-submit", "btn-create-cancel", "fld-mfa-device"] {
@@ -372,7 +372,7 @@ fn the_dialog_fits_the_smallest_window() {
 #[test]
 fn submit_is_disabled_while_the_session_is_saved() {
     let mut h = AppHarness::new();
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert!(!h.is_disabled("btn-create-submit"));
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
     let gate = h.store.hold_sets();

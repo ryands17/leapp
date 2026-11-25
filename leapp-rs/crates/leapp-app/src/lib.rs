@@ -16,6 +16,7 @@ use tokio::sync::oneshot;
 
 pub use bridge::{Bridge, Msg, UiPrompter};
 pub use refresh::spawn_refresh_loop;
+pub use views::chained_dialog::ChainedForm;
 pub use views::create_dialog::{CreateForm, FormMode};
 
 /// A question from core that waits for the user's answer. Dropping it without an answer means
@@ -79,6 +80,10 @@ pub struct Ui {
     /// The clock of `poll` when the toast first showed. `None` until the next `poll`.
     error_since: Option<f64>,
     create: CreateForm,
+    /// True while the type chooser of "Add session" is open.
+    choosing_type: bool,
+    /// The IAM Role Chained form.
+    chained: ChainedForm,
     /// Questions from core, oldest first. A dialog shows the first one.
     questions: VecDeque<Question>,
     /// The clock of `poll` when the first question came to the front. `None` until the next
@@ -115,6 +120,8 @@ impl Ui {
             error: None,
             error_since: None,
             create: CreateForm::default(),
+            choosing_type: false,
+            chained: ChainedForm::default(),
             questions: VecDeque::new(),
             question_since: None,
             question_armed: false,
@@ -146,6 +153,11 @@ impl Ui {
     /// The Create IAM User dialog.
     pub fn create_form(&self) -> &CreateForm {
         &self.create
+    }
+
+    /// The IAM Role Chained form.
+    pub fn chained_form(&self) -> &ChainedForm {
+        &self.chained
     }
 
     /// Opens the session form in edit mode for session `id`, filled from the workspace. The key
@@ -356,7 +368,9 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
     let main = views::main_window::view(s, &k, &mut layer);
+    views::type_chooser::build(s, &k, &mut layer);
     views::create_dialog::build(s, &k, &mut layer);
+    views::chained_dialog::build(s, &k, &mut layer);
     views::change_dialogs::build(s, &k, &mut layer);
     views::delete_dialog::build(s, &k, &mut layer);
     views::settings_dialog::build(s, &k, &mut layer);
@@ -404,6 +418,11 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             Msg::FormDone(result) => {
                 views::create_dialog::done(s, result);
                 // An edit can stop or start the session: show its real status.
+                s.refresh();
+            }
+            Msg::ChainedDone { token, result } => {
+                views::chained_dialog::done(s, token, result);
+                // The new session shows in the table.
                 s.refresh();
             }
             Msg::ChangeDone { token, result } => {

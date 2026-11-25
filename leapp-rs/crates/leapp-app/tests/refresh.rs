@@ -174,7 +174,7 @@ fn a_refresh_mfa_question_shows_over_the_create_dialog() {
     h.tap("btn-mfa-submit");
     h.settle(|ui| status(ui, id) == SessionStatus::Active);
 
-    h.tap("btn-create");
+    h.open_iam_user_form();
     h.tap("fld-name");
     h.type_text("half");
     assert_eq!(h.rt.state.create_form().name(), "half");

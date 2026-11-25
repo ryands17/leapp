@@ -187,6 +187,18 @@ impl AppHarness {
         self.frames(2);
     }
 
+    /// Opens the IAM User create form: "Add session", then the IAM User type.
+    pub fn open_iam_user_form(&mut self) {
+        self.tap("btn-create");
+        self.tap("btn-type-iam-user");
+    }
+
+    /// Opens the IAM Role Chained create form: "Add session", then the IAM Role Chained type.
+    pub fn open_chained_form(&mut self) {
+        self.tap("btn-create");
+        self.tap("btn-type-iam-role-chained");
+    }
+
     /// A secondary press (right-click) on the element `key`.
     pub fn secondary_tap(&mut self, key: &str) {
         let (x, y) = self

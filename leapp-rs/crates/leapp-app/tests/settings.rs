@@ -86,7 +86,7 @@ fn the_default_region_is_set_in_settings() {
 
     h.tap("btn-settings-close");
     assert!(!h.has("dlg-settings"), "the dialog is closed");
-    h.tap("btn-create");
+    h.open_iam_user_form();
     assert_eq!(h.rt.state.create_form().region(), "eu-west-1");
     assert!(shows(&h, "sel-region-value-trigger", "eu-west-1"));
 }
