@@ -7,3 +7,4 @@ pub(crate) mod main_window;
 pub(crate) mod mfa_dialog;
 pub(crate) mod overwrite_dialog;
 pub(crate) mod row_menu;
+pub(crate) mod settings_dialog;

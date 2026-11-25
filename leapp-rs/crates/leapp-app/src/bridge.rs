@@ -28,6 +28,11 @@ pub enum Msg {
     /// The create or save of the session form ended. `poll` closes the form, or shows the error
     /// in it.
     FormDone(Result<(), leapp_core::Error>),
+    /// The rename of the named profile `profile_id` that the Settings dialog asked for ended.
+    RenameDone {
+        profile_id: uuid::Uuid,
+        result: Result<(), leapp_core::Error>,
+    },
     /// Core asks for the MFA code of the session named `session`. Send the code, or `None` to
     /// cancel, on `reply`.
     AskMfa {

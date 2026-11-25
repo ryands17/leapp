@@ -104,12 +104,20 @@ fn toolbar(k: &Kit) -> El {
         .on_press(super::create_dialog::open)
         .build(k)
         .key("btn-create");
+    let settings = IconButton::new(&super::settings_dialog::GEAR)
+        .variant(IconButtonVariant::Ghost)
+        .label("Settings")
+        .on_press(super::settings_dialog::open)
+        .build(k)
+        .key("btn-settings");
     row()
         .w_full()
         .h(TOOLBAR_HEIGHT)
         .px(16.0)
         .center_y()
         .child(create)
+        .child(el().grow(1.0))
+        .child(settings)
 }
 
 fn empty_state(k: &Kit) -> El {

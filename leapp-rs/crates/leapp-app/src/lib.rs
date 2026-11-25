@@ -96,6 +96,8 @@ pub struct Ui {
     menu: Option<RowMenu>,
     /// The open delete confirm, if any.
     delete: Option<DeleteAsk>,
+    /// The Settings dialog.
+    settings: views::settings_dialog::SettingsState,
     /// The background refresh loop. `on_close` stops it.
     refresh_loop: Option<tokio::task::AbortHandle>,
 }
@@ -118,6 +120,7 @@ impl Ui {
             starting: HashSet::new(),
             menu: None,
             delete: None,
+            settings: Default::default(),
             refresh_loop: None,
         }
     }
@@ -352,6 +355,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let main = views::main_window::view(s, &k, &mut layer);
     views::create_dialog::build(s, &k, &mut layer);
     views::delete_dialog::build(s, &k, &mut layer);
+    views::settings_dialog::build(s, &k, &mut layer);
     views::overwrite_dialog::build(s, &k, &mut layer);
     views::mfa_dialog::build(s, &k, &mut layer);
     root(main, layer)
@@ -398,6 +402,11 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
                 // An edit can stop or start the session: show its real status.
                 s.refresh();
             }
+            Msg::RenameDone { profile_id, result } => {
+                views::settings_dialog::rename_done(s, profile_id, result);
+                // The rename can stop and start sessions, and their rows show the new name.
+                s.refresh();
+            }
         }
     }
     if !s.questions.is_empty() && !s.question_armed {
@@ -426,17 +435,10 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some(ask) = s.delete.as_mut().filter(|d| !d.armed) {
-        let since = *ask.since.get_or_insert_with(|| {
-            changed = true;
-            t
-        });
-        let left = CONFIRM_ARM_SECONDS - (t - since);
-        if left <= 0.0 {
-            ask.armed = true;
-            changed = true;
-        } else {
-            tx.wake_after(Duration::from_secs_f64(left));
-        }
+        changed |= arm(&mut ask.since, &mut ask.armed, t, tx);
+    }
+    if let Some(ask) = s.settings.delete.as_mut().filter(|d| !d.armed) {
+        changed |= arm(&mut ask.since, &mut ask.armed, t, tx);
     }
     if s.error.is_some() {
         let since = *s.error_since.get_or_insert(t);
@@ -449,6 +451,21 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
         }
     }
     changed
+}
+
+/// Arms a confirm [`CONFIRM_ARM_SECONDS`] after `since` (set to `t` at its first poll). Asks
+/// for a `poll` when the delay ends. True if the confirm changed.
+fn arm(since: &mut Option<f64>, armed: &mut bool, t: f64, tx: &mut Tx) -> bool {
+    let first = since.is_none();
+    let since = *since.get_or_insert(t);
+    let left = CONFIRM_ARM_SECONDS - (t - since);
+    if left <= 0.0 {
+        *armed = true;
+        true
+    } else {
+        tx.wake_after(Duration::from_secs_f64(left));
+        first
+    }
 }
 
 /// Gives the bridge the waker of the UI thread.
