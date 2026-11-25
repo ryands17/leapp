@@ -1315,3 +1315,68 @@ async fn a_parent_token_of_keys_from_a_failed_edit_is_not_kept() {
         "the token of the rejected keys is in the keychain"
     );
 }
+
+/// F1-R4: an edit of both keys writes the new access key ID, then the write of the new secret
+/// key fails and the edit puts the old ID back. A chained start that read the new ID meanwhile
+/// must not keep its token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_token_of_keys_from_a_failed_key_write_is_not_kept() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let (p, c) = parent_and_child(&h, |_| {});
+    // The start reads the parent's keys only after the edit wrote the new access key ID.
+    let read_gate = store.block_next_get(&format!("iam-user-{p}-access-key-id"));
+    // The edit waits before it writes the new secret key; that write then fails.
+    let write_gate = store.block_set(&format!("iam-user-{p}-secret-access-key"));
+    h.fake
+        .delay_next("GetSessionToken", std::time::Duration::from_secs(2));
+
+    let leapp = &h.leapp;
+    let fake = &h.fake;
+    let (started, edited, edit_ended_first) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| block_on(leapp.start(c)));
+        read_gate.wait_blocked();
+        // The first set (the new access key ID) works, the second (the secret key) fails.
+        store.fail_set_after(1);
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(p, new_keys_for_p(None))));
+        write_gate.wait_blocked();
+        read_gate.open();
+        let sent = std::time::Instant::now();
+        while fake.count("GetSessionToken") == 0 {
+            if sent.elapsed().as_secs() >= 5 {
+                // Open the gate first, so that the edit ends and the test does not hang.
+                write_gate.open();
+                panic!("no GetSessionToken came");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        write_gate.open();
+        let edited = editor.join().unwrap();
+        let edit_ended_first = !starter.is_finished();
+        (starter.join().unwrap(), edited, edit_ended_first)
+    });
+
+    assert!(edit_ended_first, "the start ended first: no race was made");
+    assert!(matches!(edited, Err(Error::Secret(_))), "{edited:?}");
+    assert_eq!(
+        token_call_keys(&h),
+        [Some("AKID-NEW".to_string())],
+        "the start got its token with the rejected key"
+    );
+    started.unwrap();
+    assert_eq!(
+        h.secrets
+            .snapshot()
+            .get(&format!("iam-user-{p}-access-key-id"))
+            .map(String::as_str),
+        Some("AKID-P"),
+        "the failed edit put the old key back"
+    );
+    assert_eq!(expiration(&h, p), None, "the token got an expiration");
+    assert!(
+        !h.secrets
+            .snapshot()
+            .contains_key(&format!("iam-user-{p}-session-token")),
+        "the token of the rejected keys is in the keychain"
+    );
+}

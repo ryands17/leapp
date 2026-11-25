@@ -149,10 +149,12 @@ impl Leapp {
             }
         }
 
-        if let Some(change) = &key_change {
-            change.write(secrets, &names)?;
-        }
-        let saved = {
+        let written = match &key_change {
+            // On a failure, `write` puts the old keys back before it returns.
+            Some(change) => change.write(secrets, &names),
+            None => Ok(()),
+        };
+        let saved = written.and_then(|()| {
             let mut state = self.state.lock().unwrap();
             let expected = if was_active && !restart {
                 SessionStatus::Active
@@ -190,21 +192,32 @@ impl Leapp {
                     store::save(&self.workspace_path, &next).map(|()| state.ws = next)
                 }
             };
-            // A token of the old keys or the old MFA device that a chained start still gets
-            // for this session must not get an expiration (F23-R7). If the save failed, a start
-            // can have read the new keys before the undo below: its token must not be kept
-            // either (F1-R4). A bump that is not necessary only makes a start get a new token.
-            if keys_changed || mfa_changed {
-                *state.key_generation.entry(id).or_default() += 1;
-            }
-            saved
-        };
-        if let Err(e) = saved {
-            if let Some(change) = &key_change {
+            // The keychain is written without the lock.
+            drop(state);
+            if saved.is_err()
+                && let Some(change) = &key_change
+            {
                 change.undo(secrets, &names);
             }
-            return Err(e);
+            saved
+        });
+        // The keychain and the workspace now hold their final keys and MFA device: the new ones,
+        // or the old ones after a failed write or save. The key generation goes up here, once, on
+        // every path. A chained start that began before the edit read the generation before it,
+        // and it can have read old keys, new keys, rejected keys or a mix: its token is not kept
+        // (F23-R7, F1-R4). A chained start that begins during the edit is refused, because the
+        // edit's reservation holds the parent. A bump that is not necessary only makes a start
+        // get a new token.
+        if keys_changed || mfa_changed {
+            *self
+                .state
+                .lock()
+                .unwrap()
+                .key_generation
+                .entry(id)
+                .or_default() += 1;
         }
+        saved?;
         // The expiration is cleared, so a token that this delete misses is not reused.
         if keys_changed || mfa_changed {
             let _ = secrets.delete(&names.token);

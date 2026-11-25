@@ -116,10 +116,11 @@ Deferred by the F3 reviews and the final review (open unless marked done):
   keychain prompt would freeze the UI, which reads the workspace each frame. Option: a per-parent
   write lock. F4 must decide this before it copies the pattern (see the `CLAUDE.md` gotcha).
 - Core: no test for the cascade stop order.
-- Core: `update_iam_user` writes the new keys before the save. If the second key write fails,
-  `KeyChange::write` undoes the first one but does not bump the key generation, so a chained start
-  that reads the first new key in that window can keep a token of it (the same F1-R4 gap as I3,
-  on the write-failure path).
+- Done (test `a_parent_token_of_keys_from_a_failed_key_write_is_not_kept`): if the second key
+  write of `update_iam_user` failed, `KeyChange::write` undid the first one but did not bump the
+  key generation, so a chained start that read the first new key kept a token of it (F1-R4). Now
+  the key generation goes up in one place, after the keychain and the workspace hold their final
+  keys, on every path (success, failed write, failed save after the undo).
 - Core (Task 3): T3-m1, T3-m3, T3-m4, T3-m5: the ledger has no text, and the final review found no
   defect in `chained.rs`. Read the Task 3 review again before F4.
 - Core (Task 4): T4-m5 (ruled, no change): the missing-parent message names the session whose
