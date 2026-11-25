@@ -561,7 +561,27 @@ const SCENES: &[Scene] = &[
         "create-dialog-profile",
         views::create_dialog::open_with_profile_list,
     ),
+    ("settings-profiles", settings_profiles),
+    ("chained-dialog", chained_dialog),
+    ("choose-type", views::type_chooser::open),
 ];
+
+/// The Settings dialog on the Profiles tab, with two named profiles besides `default`.
+fn settings_profiles(s: &mut Ui) {
+    for name in ["work", "personal"] {
+        if let Err(e) = s.leapp.create_profile(name) {
+            s.show_error(e.to_string());
+        }
+    }
+    s.refresh();
+    views::settings_dialog::open_profiles(s);
+}
+
+/// The chained form on top of one IAM User, which it can use as the assumer session.
+fn chained_dialog(s: &mut Ui) {
+    one_session(s);
+    views::chained_dialog::open(s);
+}
 
 /// One inactive IAM User. Needs no AWS: it only writes the workspace and the secret store.
 fn one_session(s: &mut Ui) {

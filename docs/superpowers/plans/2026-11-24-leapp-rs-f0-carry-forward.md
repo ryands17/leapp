@@ -51,8 +51,58 @@ moved (see the last two items).
 
 ## F2 (named profiles)
 
-- The Named Profile field is a text field. Replace it with a select.
-- Hard-coded default region `us-east-1` moves to settings.
+F2 and F3 are done on branch `leapp-rs-f2-f3` (not yet merged).
+
+- Done (`57b57606`, tests `the_profile_field_lists_the_profiles`, `a_new_profile_name_can_be_typed`,
+  `an_existing_name_offers_no_create_option` in `tests/profiles_field.rs`): the Named Profile field
+  is a select with a create option.
+- Done (`332d10cf`, `aa331871`, tests `the_default_region_is_set_in_settings` in
+  `tests/settings.rs` and `the_form_preselects_the_default_region` in `tests/profiles_field.rs`):
+  the default region is a setting; the forms use it.
+
+Deferred by the F2 and F3 reviews (open; the final review decides):
+
+- Profiles: a profile named `__new__` shares the key `sel-profile-option-__new__` with the create
+  option. No test for an unchanged-profile edit, or for "default " with no create option.
+- Profiles: a stale `RenameDone` (close, reopen, rename again) matches only by profile ID and can
+  clear the new rename. Fix: a rename token, and no `expect`.
+- Profiles: a profile delete can be submitted twice; `ProfilePending` closes the rename field and
+  loses the typed name; a failed `update_settings` leaves the select on the unsaved value; the tabs
+  have no selected state for accessibility.
+- Profiles (core): `delete_profile` refuses when a default session is `Pending`. A user stop during
+  a change is undone (same as `update_iam_user`). The chmod tests fail as root.
+- Change region and profile dialogs: Cancel and close are locked while a change saves (a hung AWS
+  call keeps the dialog up until the STS timeout, 10 s). No test for a change whose restart asks
+  MFA or overwrite. The `InvalidInput` match is not field-specific.
+
+## F3 (IAM Role Chained)
+
+F3 is done on branch `leapp-rs-f2-f3` (commits `6c6e9e8c`, `8bd44738`, `4158f4b9`, `e7f2b3bb`,
+`4d555fdf`, `ee9ef0cf`). Tests: `crates/leapp-core/tests/chained.rs`,
+`crates/leapp-app/tests/chained.rs`, `crates/leapp-app/tests/row_menu.rs`.
+
+Deferred by the F3 reviews (open; the final review decides):
+
+- Core: two parallel fresh parent tokens can split the keychain token and its expiry. A failed edit
+  can leave a reusable token of rejected keys. The MFA-only test also changes the region.
+- Core: `save_parent_token` writes to the keychain under the core state `Mutex`. A blocking
+  keychain prompt would freeze the UI, which reads the workspace each frame. Option: a per-parent
+  write lock.
+- Core: a create or edit under a chain that a delete holds succeeds, then the delete removes it.
+  Fix: `check_parent` refuses a held parent. No test for the cascade stop order.
+- Core: `update_iam_role_chained` copies about 40 lines of the `update_iam_user` skeleton. The
+  `From<IamRoleChainedUpdate>` impl, the `Editing` doc comment and the duplicated `modes_are_ignored`
+  need a rust-review clean-up.
+- App: label case differs between forms ("Named profile" and "Session alias" in the chained form;
+  "Named Profile" and "Session Alias" in the IAM User form). Parent options with the same name
+  cannot be told apart. No app test for `err-parent`, `err-chained-name`, `err-chained-form`.
+- App: `#[allow(clippy::too_many_arguments)]` has no reason. `purple()` is in `chained_dialog.rs`,
+  not next to `orange()`. Unused `Tx` in `submit`. `request()` checks the parent again.
+  `ChainedForm::is_open` has no doc.
+- App: the delete count is frozen when the confirm opens (compute it in `build` from
+  `ws.descendants`). A chained `open_edit` with an unknown profile gives an empty profile. The
+  `chained()` test helper is copied in two test files. No stale-token test for a chained create or
+  edit.
 
 ## F4 (AWS SSO)
 

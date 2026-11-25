@@ -97,6 +97,12 @@ pub(crate) fn open(s: &mut Ui) {
     };
 }
 
+/// Opens the dialog on the Profiles tab. For the headless scene only.
+pub(crate) fn open_profiles(s: &mut Ui) {
+    open(s);
+    show_tab(s, Tab::Profiles);
+}
+
 /// Closes the dialog. A rename that runs still ends; its error shows in the toast.
 fn close(s: &mut Ui) {
     s.settings = SettingsState::default();

@@ -13,8 +13,8 @@ Run all commands in `leapp-rs/`.
   (service `leapp-rs`) and real AWS. Close the window or press Cmd+Q to quit and clean up.
 - Headless snapshots (no window, no real home, no keychain):
   `cargo run -p leapp-app -- --snap target/shots/main-empty.png`, add `--scene one-session`,
-  `--scene create-dialog` or `--scene create-dialog-region` for other states
-  (`--list-scenes` lists them). Scenes are in `SCENES` in `crates/leapp-app/src/lib.rs`.
+  `--scene create-dialog`, `create-dialog-region`, `create-dialog-profile`, `settings-profiles`,
+  `chained-dialog` or `choose-type` for other states (`--list-scenes` lists them). Scenes are in `SCENES` in `crates/leapp-app/src/lib.rs`.
 
 ## Rules
 
@@ -60,6 +60,26 @@ Run all commands in `leapp-rs/`.
   frame element is `menu-<id>-menu`, the items are `menu-<id>-item<i>`), `dlg-mfa`,
   `fld-mfa-code`, `btn-mfa-submit`, `btn-mfa-cancel`, `dlg-delete`, `btn-delete-yes`,
   `btn-delete-no`, `btn-secret-eye`, `fld-mfa-device`, `err-mfa-device`, `btn-empty-add-session`.
+- F2 and F3 keys. Forms: `sel-profile` (a `Combobox`: the Named Profile select; the old text field
+  `fld-profile` is gone), `sel-region`, `err-profile`, `err-region`. The option `__new__`
+  (`sel-profile-option-__new__`) creates the typed name. Settings: `dlg-settings`, `tab-general`,
+  `tab-profiles`, `sel-default-region`, `err-default-region`, `btn-settings-close`,
+  `fld-new-profile`, `btn-profile-add`, `err-new-profile`, `btn-profile-rename-<id>`,
+  `fld-profile-rename-<id>`, `btn-profile-rename-save-<id>`, `err-profile-rename-<id>`,
+  `btn-profile-delete-<id>`, `dlg-delete-profile`, `btn-delete-profile-yes`,
+  `btn-delete-profile-no`. Row menu changes: `dlg-chg-region`, `sel-change-region`,
+  `btn-chg-region-save`, `btn-chg-region-cancel`, `dlg-chg-profile`, `sel-change-profile`,
+  `btn-chg-profile-save`, `btn-chg-profile-cancel`. Type chooser: `dlg-choose-type`,
+  `btn-type-iam-user`, `btn-type-iam-role-chained`. Chained form: `dlg-iam-role-chained`,
+  `fld-chained-name`, `sel-parent`, `fld-role-arn`, `fld-role-session-name`, `fld-external-id`,
+  `err-chained-name`, `err-parent`, `err-role-arn`, `err-role-session-name`, `err-external-id`,
+  `err-chained-form`, `btn-chained-submit`, `btn-chained-cancel`.
+- Core `change_sessions(ids, change)` (`sessions/change.rs`) is the one path for a change of many
+  sessions (region, profile, rename or delete of a profile). It reserves the sessions with
+  `Editing` (`sessions/edit.rs`) so that no start or refresh runs on them, stops the `Active` ones,
+  saves, then starts them again. A session that another edit or change holds gives
+  `ProfilePending`. Create, edit and delete of a chained session use the same `Editing`
+  reservation.
 - Menu item keys hold an index, not a name. Tests pick an item by its label:
   `AppHarness::tap_menu_item(id, "Delete session")`.
 - rune-kit `Menu::new(k)` keys its frame `<k>-menu` and its items `<k>-item<i>`. A chosen item does not close the menu: each `on_select` clears the app's open-menu state. `row-` also matches the `row-menu-<id>` buttons: tests list rows with `AppHarness::row_keys`.
