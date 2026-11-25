@@ -20,12 +20,12 @@ use uuid::Uuid;
 pub use config::{Clock, Config, Endpoints, Prompter, SystemClock};
 pub use error::{Error, Field, Result};
 pub use model::{
-    IamUserUpdate, ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind,
-    SessionStatus, Settings, Workspace,
+    IamUserUpdate, ManagedProfile, NamedProfile, NewIamRoleChained, NewIamUser, Session, SessionId,
+    SessionKind, SessionStatus, Settings, Workspace,
 };
 pub use refresh::{REFRESH_TICK, RefreshFailure, RefreshReport, SESSION_DURATION};
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};
-pub use sessions::TOKEN_REUSE_MARGIN;
+pub use sessions::{ASSUME_ROLE_DURATION, DEFAULT_ROLE_SESSION_NAME, TOKEN_REUSE_MARGIN};
 
 pub struct Leapp {
     config: Config,

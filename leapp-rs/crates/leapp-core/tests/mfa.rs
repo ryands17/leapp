@@ -77,6 +77,7 @@ async fn an_empty_mfa_device_is_stored_as_none() {
     let ws = h.leapp.workspace();
     match &ws.session(id).unwrap().kind {
         SessionKind::IamUser { mfa_device, .. } => assert_eq!(*mfa_device, None),
+        other => panic!("not an IAM User: {other:?}"),
     }
     let saved: serde_json::Value = serde_json::from_str(&h.workspace_text()).unwrap();
     let kind = &saved["sessions"][0]["kind"];

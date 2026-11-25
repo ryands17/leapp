@@ -5,6 +5,7 @@ use std::time::Duration;
 use aws_sdk_sts::config::timeout::TimeoutConfig;
 use aws_sdk_sts::config::{BehaviorVersion, Credentials, Region, retry::RetryConfig};
 use aws_sdk_sts::error::{DisplayErrorContext, ProvideErrorMetadata};
+use aws_sdk_sts::primitives::DateTime;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +26,8 @@ pub const TOKEN_REUSE_MARGIN: SignedDuration = SignedDuration::from_secs(1200);
 pub(crate) struct Issued {
     pub body: SectionBody,
     pub expiration: Timestamp,
-    /// `true` if this call got a new token from `GetSessionToken`.
+    /// `true` if this call got a new token from `GetSessionToken`, so the caller may fetch the
+    /// account with it. Always `false` for a chained session: its account is in the role ARN.
     pub fresh: bool,
 }
 
@@ -42,11 +44,7 @@ impl Leapp {
     pub(crate) async fn iam_user_credentials(&self, session: &Session) -> Result<Issued> {
         let secrets = &self.config.secrets;
         let token_key = format!("iam-user-{}-session-token", session.id);
-        let region = if session.region.trim().is_empty() {
-            DEFAULT_REGION.to_string()
-        } else {
-            session.region.trim().to_string()
-        };
+        let region = session_region(session);
 
         if let Some(expiration) = session.session_token_expiration
             && expiration.duration_since(self.config.clock.now()) > TOKEN_REUSE_MARGIN
@@ -69,6 +67,7 @@ impl Leapp {
 
         let mfa = match &session.kind {
             SessionKind::IamUser { mfa_device, .. } => mfa_device.clone(),
+            SessionKind::IamRoleChained { .. } => return Err(Error::WrongSessionType(session.id)),
         };
         // No lock is held here: the prompter may wait for the user.
         let token_code = match mfa {
@@ -106,10 +105,7 @@ impl Leapp {
         let credentials = output
             .credentials()
             .ok_or_else(|| Error::Aws("AWS returned no credentials".into()))?;
-        let expiration = credentials.expiration();
-        let invalid = || Error::Aws("AWS returned an invalid expiration time".into());
-        let nanos = i32::try_from(expiration.subsec_nanos()).map_err(|_| invalid())?;
-        let expiration = Timestamp::new(expiration.secs(), nanos).map_err(|_| invalid())?;
+        let expiration = expiration_of(credentials.expiration())?;
         let token = CachedToken {
             access_key_id: credentials.access_key_id().trim().to_string(),
             secret_access_key: credentials.secret_access_key().trim().to_string(),
@@ -124,7 +120,7 @@ impl Leapp {
     }
 
     /// An STS client with fixed credentials, the session region, one try and a timeout.
-    fn sts_client(
+    pub(super) fn sts_client(
         &self,
         access_key_id: &str,
         secret_access_key: &str,
@@ -189,7 +185,9 @@ impl Leapp {
         let Some(session) = next.sessions.iter_mut().find(|s| s.id == id) else {
             return;
         };
-        let SessionKind::IamUser { account: slot, .. } = &mut session.kind;
+        let SessionKind::IamUser { account: slot, .. } = &mut session.kind else {
+            return;
+        };
         if slot.is_some() {
             return;
         }
@@ -209,8 +207,23 @@ fn body(token: CachedToken, region: String) -> SectionBody {
     }
 }
 
+/// The region of the session, or `DEFAULT_REGION` if it is empty.
+pub(super) fn session_region(session: &Session) -> String {
+    match session.region.trim() {
+        "" => DEFAULT_REGION.to_string(),
+        region => region.to_string(),
+    }
+}
+
+/// The STS expiration time as a `Timestamp`.
+pub(super) fn expiration_of(expiration: &DateTime) -> Result<Timestamp> {
+    let invalid = || Error::Aws("AWS returned an invalid expiration time".into());
+    let nanos = i32::try_from(expiration.subsec_nanos()).map_err(|_| invalid())?;
+    Timestamp::new(expiration.secs(), nanos).map_err(|_| invalid())
+}
+
 /// The message from AWS if there is one and it is not empty, else the full error chain.
-fn aws_message<E>(error: &aws_sdk_sts::error::SdkError<E>) -> String
+pub(super) fn aws_message<E>(error: &aws_sdk_sts::error::SdkError<E>) -> String
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {

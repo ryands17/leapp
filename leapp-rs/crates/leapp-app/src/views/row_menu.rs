@@ -62,6 +62,8 @@ fn items(session: &Session) -> [MenuItem; 4] {
     });
     let account = match &session.kind {
         SessionKind::IamUser { account, .. } => account.clone(),
+        // Task 10 adds the account and the role ARN of a chained session.
+        SessionKind::IamRoleChained { .. } => None,
     };
     let copy = MenuItem::new("Copy account number")
         .disabled(account.is_none())

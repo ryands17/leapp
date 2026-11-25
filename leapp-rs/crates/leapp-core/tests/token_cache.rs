@@ -24,6 +24,7 @@ async fn started_and_stopped(h: &Harness) -> leapp_core::SessionId {
 fn account(h: &Harness, id: leapp_core::SessionId) -> Option<String> {
     match &h.leapp.workspace().session(id).unwrap().kind {
         SessionKind::IamUser { account, .. } => account.clone(),
+        other => panic!("not an IAM User: {other:?}"),
     }
 }
 

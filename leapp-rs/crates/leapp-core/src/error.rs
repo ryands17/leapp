@@ -11,6 +11,10 @@ pub enum Field {
     Profile,
     Region,
     MfaDevice,
+    ParentSession,
+    RoleArn,
+    RoleSessionName,
+    ExternalId,
 }
 
 impl fmt::Display for Field {
@@ -22,6 +26,10 @@ impl fmt::Display for Field {
             Field::Profile => "profile",
             Field::Region => "region",
             Field::MfaDevice => "mfa_device",
+            Field::ParentSession => "parent_session",
+            Field::RoleArn => "role_arn",
+            Field::RoleSessionName => "role_session_name",
+            Field::ExternalId => "external_id",
         })
     }
 }
@@ -30,6 +38,10 @@ impl fmt::Display for Field {
 pub enum Error {
     #[error("session {0} not found")]
     NotFound(Uuid),
+    #[error("session {0} has another type")]
+    WrongSessionType(Uuid),
+    #[error("the parent sessions of \"{0}\" make a loop")]
+    ChainLoop(String),
     #[error("named profile {0} not found")]
     ProfileNotFound(Uuid),
     #[error("invalid {field}: {message}")]

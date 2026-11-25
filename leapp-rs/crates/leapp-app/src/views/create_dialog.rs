@@ -93,6 +93,10 @@ impl FieldErrors {
             Field::Profile => &mut self.profile,
             Field::Region => &mut self.region,
             Field::MfaDevice => &mut self.mfa_device,
+            // The IAM User form has none of these fields; Task 9 adds the chained form.
+            Field::ParentSession | Field::RoleArn | Field::RoleSessionName | Field::ExternalId => {
+                &mut self.form
+            }
         }
     }
 }
@@ -268,7 +272,10 @@ pub(crate) fn open_edit(s: &mut Ui, id: SessionId) {
         return;
     };
     let profile = s.ws.profile_name(session.profile_id).unwrap_or_default();
-    let SessionKind::IamUser { mfa_device, .. } = &session.kind;
+    // Task 9 adds the edit form of a chained session.
+    let SessionKind::IamUser { mfa_device, .. } = &session.kind else {
+        return;
+    };
     s.create = CreateForm {
         open: true,
         mode: FormMode::Edit(id),

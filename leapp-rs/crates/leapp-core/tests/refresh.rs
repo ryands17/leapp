@@ -250,7 +250,9 @@ async fn a_session_under_edit_is_skipped() {
     let gate = store.block_get(&format!("iam-user-{id}-access-key-id"));
     let ws = h.leapp.workspace();
     let s = ws.session(id).unwrap();
-    let SessionKind::IamUser { mfa_device, .. } = &s.kind;
+    let SessionKind::IamUser { mfa_device, .. } = &s.kind else {
+        panic!("not an IAM User");
+    };
     let req = IamUserUpdate {
         name: "dev2".into(),
         profile_name: "default".into(),

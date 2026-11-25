@@ -135,7 +135,10 @@ fn an_mfa_device_can_be_added_and_removed() {
     h.settle_with(|h| !h.has("dlg-iam-user"));
     let mfa = |h: &AppHarness| {
         let leapp_core::SessionKind::IamUser { mfa_device, .. } =
-            h.leapp.workspace().session(id).unwrap().kind.clone();
+            h.leapp.workspace().session(id).unwrap().kind.clone()
+        else {
+            panic!("not an IAM User");
+        };
         mfa_device
     };
     assert_eq!(mfa(&h).as_deref(), Some(common::MFA_DEVICE));

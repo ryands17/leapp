@@ -23,7 +23,9 @@ async fn settle(mut done: impl FnMut() -> bool) {
 fn same_as_now(h: &Harness, id: SessionId) -> IamUserUpdate {
     let ws = h.leapp.workspace();
     let s = ws.session(id).unwrap();
-    let SessionKind::IamUser { mfa_device, .. } = &s.kind;
+    let SessionKind::IamUser { mfa_device, .. } = &s.kind else {
+        panic!("not an IAM User");
+    };
     IamUserUpdate {
         name: s.name.clone(),
         profile_name: ws.profile_name(s.profile_id).unwrap().to_string(),
@@ -36,7 +38,9 @@ fn same_as_now(h: &Harness, id: SessionId) -> IamUserUpdate {
 
 fn account(h: &Harness, id: SessionId) -> Option<String> {
     let ws = h.leapp.workspace();
-    let SessionKind::IamUser { account, .. } = &ws.session(id).unwrap().kind;
+    let SessionKind::IamUser { account, .. } = &ws.session(id).unwrap().kind else {
+        panic!("not an IAM User");
+    };
     account.clone()
 }
 
@@ -202,7 +206,9 @@ async fn edit_of_the_mfa_device_drops_the_token_and_keeps_the_account() {
     h.leapp.update_iam_user(id, req).await.unwrap();
 
     let s = h.leapp.workspace().session(id).unwrap().clone();
-    let SessionKind::IamUser { mfa_device, .. } = &s.kind;
+    let SessionKind::IamUser { mfa_device, .. } = &s.kind else {
+        panic!("not an IAM User");
+    };
     assert_eq!(
         mfa_device.as_deref(),
         Some("arn:aws:iam::123456789012:mfa/dev")

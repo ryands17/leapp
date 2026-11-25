@@ -337,7 +337,10 @@ fn an_mfa_device_is_saved() {
     h.tap("btn-create-submit");
     h.settle(|ui| ui.workspace().sessions.len() == 1);
 
-    let leapp_core::SessionKind::IamUser { mfa_device, .. } = &h.leapp.workspace().sessions[0].kind;
+    let leapp_core::SessionKind::IamUser { mfa_device, .. } = &h.leapp.workspace().sessions[0].kind
+    else {
+        panic!("not an IAM User");
+    };
     assert_eq!(mfa_device.as_deref(), Some(common::MFA_DEVICE));
 }
 

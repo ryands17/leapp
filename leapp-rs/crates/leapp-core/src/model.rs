@@ -90,6 +90,51 @@ pub enum SessionKind {
         mfa_device: Option<String>,
         account: Option<String>,
     },
+    /// Assumes `role_arn` with the temporary keys of the parent session (spec 12).
+    IamRoleChained {
+        role_arn: String,
+        parent_session_id: SessionId,
+        /// `None`: `DEFAULT_ROLE_SESSION_NAME` is sent.
+        role_session_name: Option<String>,
+        external_id: Option<String>,
+    },
+}
+
+impl Session {
+    /// The AWS account number: the one fetched for an IAM User, the one in the role ARN of a
+    /// chained session (F23-R10).
+    pub fn account(&self) -> Option<String> {
+        match &self.kind {
+            SessionKind::IamUser { account, .. } => account.clone(),
+            SessionKind::IamRoleChained { role_arn, .. } => {
+                role_arn_account(role_arn).map(str::to_string)
+            }
+        }
+    }
+}
+
+/// The account number of a role ARN, if it looks like
+/// `arn:<aws|aws-cn|aws-us-gov>:iam::<12 digits>:role/<path and name>` (F23-R10).
+pub(crate) fn role_arn_account(arn: &str) -> Option<&str> {
+    let mut parts = arn.splitn(6, ':');
+    let (Some("arn"), Some(partition), Some("iam"), Some(""), Some(account), Some(resource)) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return None;
+    };
+    let partition_ok = matches!(partition, "aws" | "aws-cn" | "aws-us-gov");
+    let account_ok = account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit());
+    // The role name is the part after the last `/` of the path; it must not be empty.
+    let name_ok = resource.strip_prefix("role/").is_some_and(|path| {
+        path.rsplit('/').next().is_some_and(|name| !name.is_empty())
+            && !path.chars().any(|c| c.is_whitespace() || c.is_control())
+    });
+    (partition_ok && account_ok && name_ok).then_some(account)
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +179,21 @@ impl std::fmt::Debug for NewIamUser {
             .field("mfa_device", &self.mfa_device)
             .finish()
     }
+}
+
+/// A new IAM Role Chained session. It holds no secrets: a role ARN, a role session name and an
+/// external ID are not secret.
+#[derive(Clone, Debug)]
+pub struct NewIamRoleChained {
+    pub name: String,
+    pub parent_session_id: SessionId,
+    pub role_arn: String,
+    /// Empty after trim means not set: `DEFAULT_ROLE_SESSION_NAME` is sent.
+    pub role_session_name: Option<String>,
+    /// Empty after trim means not set.
+    pub external_id: Option<String>,
+    pub profile_name: String,
+    pub region: String,
 }
 
 /// New values for an IAM User session. A key field that is `None` or empty after trim keeps the

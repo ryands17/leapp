@@ -1,9 +1,11 @@
 //! Start and stop of sessions (spec 10.1, 10.2).
 
+mod chained;
 mod change;
 mod edit;
 mod iam_user;
 
+pub use chained::{ASSUME_ROLE_DURATION, DEFAULT_ROLE_SESSION_NAME};
 use iam_user::Issued;
 pub use iam_user::TOKEN_REUSE_MARGIN;
 
@@ -447,12 +449,10 @@ impl Leapp {
             body,
             expiration,
             fresh,
-        } = match session.kind {
-            SessionKind::IamUser { .. } => self
-                .iam_user_credentials(session)
-                .await
-                .map_err(|e| (e, BackupFate::Delete))?,
-        };
+        } = self
+            .session_credentials(session, &mut Vec::new())
+            .await
+            .map_err(|e| (e, BackupFate::Delete))?;
 
         let mut state = self.state.lock().unwrap();
         // This is the check that counts: it is in the critical section that writes. The

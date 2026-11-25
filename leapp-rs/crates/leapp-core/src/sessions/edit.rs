@@ -98,7 +98,9 @@ impl Leapp {
             if session.status == SessionStatus::Pending {
                 return Err(pending_error());
             }
-            let SessionKind::IamUser { mfa_device, .. } = &session.kind;
+            let SessionKind::IamUser { mfa_device, .. } = &session.kind else {
+                return Err(Error::WrongSessionType(id));
+            };
             let seen = (
                 session.status == SessionStatus::Active,
                 profile_name(&state.ws, session.profile_id)?,
@@ -174,13 +176,16 @@ impl Leapp {
                     if keys_changed || mfa_changed {
                         session.session_token_expiration = None;
                     }
-                    let SessionKind::IamUser {
+                    // The check above refused other types, and a session never changes its type.
+                    if let SessionKind::IamUser {
                         mfa_device,
                         account,
-                    } = &mut session.kind;
-                    *mfa_device = valid.mfa_device.clone();
-                    if keys_changed {
-                        *account = None;
+                    } = &mut session.kind
+                    {
+                        *mfa_device = valid.mfa_device.clone();
+                        if keys_changed {
+                            *account = None;
+                        }
                     }
                     store::save(&self.workspace_path, &next).map(|()| {
                         state.ws = next;

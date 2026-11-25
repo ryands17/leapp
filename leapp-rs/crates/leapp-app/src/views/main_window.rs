@@ -248,6 +248,7 @@ fn session_row(ws: &Workspace, s: &Session, menu: El, k: &Kit) -> El {
 fn provider_label(kind: &SessionKind) -> &'static str {
     match kind {
         SessionKind::IamUser { .. } => "IAM User",
+        SessionKind::IamRoleChained { .. } => "IAM Role Chained",
     }
 }
 

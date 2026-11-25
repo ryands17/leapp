@@ -1,7 +1,8 @@
 //! A fake AWS STS server for tests.
 //!
 //! The pinned `aws-sdk-sts` uses the Query protocol: a form-encoded body with
-//! `Action=<name>`. This server answers `GetSessionToken` and `GetCallerIdentity` in that protocol.
+//! `Action=<name>`. This server answers `GetSessionToken`, `AssumeRole` and `GetCallerIdentity`
+//! in that protocol.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ pub struct Recorded {
     pub params: BTreeMap<String, String>,
     /// From the `Credential=` part of the SigV4 `Authorization` header.
     pub access_key_id: Option<String>,
+    /// From the `x-amz-security-token` header (temporary credentials only).
+    pub session_token: Option<String>,
 }
 
 struct Failure {
@@ -33,6 +36,8 @@ struct Inner {
     failures: HashMap<String, VecDeque<Failure>>,
     delays: HashMap<String, VecDeque<Duration>>,
     issued: usize,
+    /// Number of `AssumeRole` answers with keys so far.
+    assumed: usize,
     account: Option<String>,
 }
 
@@ -132,6 +137,10 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(access_key_from_authorization);
+    let session_token = headers
+        .get("x-amz-security-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
 
     let (failure, delay, n, account) = {
         let mut inner = inner.lock().unwrap();
@@ -139,17 +148,24 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
             action: action.clone(),
             params: params.clone(),
             access_key_id,
+            session_token,
         });
         let failure = inner
             .failures
             .get_mut(&action)
             .and_then(VecDeque::pop_front);
         let delay = inner.delays.get_mut(&action).and_then(VecDeque::pop_front);
-        let n = if failure.is_none() && action == "GetSessionToken" {
-            inner.issued += 1;
-            inner.issued
-        } else {
-            0
+        let n = match action.as_str() {
+            _ if failure.is_some() => 0,
+            "GetSessionToken" => {
+                inner.issued += 1;
+                inner.issued
+            }
+            "AssumeRole" => {
+                inner.assumed += 1;
+                inner.assumed
+            }
+            _ => 0,
         };
         (failure, delay, n, account_of(&inner))
     };
@@ -176,6 +192,9 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
         );
         return ([(header::CONTENT_TYPE, "text/xml")], xml).into_response();
     }
+    if action == "AssumeRole" {
+        return assume_role(&params, n);
+    }
     if action != "GetSessionToken" {
         let xml = "<ErrorResponse><Error><Type>Sender</Type><Code>InvalidAction</Code><Message>The fake server does not know this action.</Message></Error><RequestId>fake-err</RequestId></ErrorResponse>";
         return (
@@ -186,14 +205,7 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
             .into_response();
     }
 
-    let seconds: i64 = params
-        .get("DurationSeconds")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(43200);
-    let expiration = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_secs(seconds))
-        .expect("expiration is in range")
-        .strftime("%Y-%m-%dT%H:%M:%SZ");
+    let expiration = expiration(&params, 43200);
     let xml = format!(
         r#"<GetSessionTokenResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <GetSessionTokenResult><Credentials>
@@ -204,6 +216,46 @@ async fn handle(State(inner): State<Shared>, headers: HeaderMap, body: String) -
 </GetSessionTokenResponse>"#
     );
     ([(header::CONTENT_TYPE, "text/xml")], xml).into_response()
+}
+
+/// The `AssumeRole` answer with the `n`th chained keys.
+fn assume_role(params: &BTreeMap<String, String>, n: usize) -> Response {
+    let expiration = expiration(params, 3600);
+    let role_arn = params.get("RoleArn").map(String::as_str).unwrap_or("");
+    let session_name = params
+        .get("RoleSessionName")
+        .map(String::as_str)
+        .unwrap_or("");
+    let assumed_arn = format!(
+        "{}/{session_name}",
+        role_arn.replacen(":role/", ":assumed-role/", 1)
+    );
+    let xml = format!(
+        r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleResult>
+    <Credentials>
+      <AccessKeyId>ASIACHAIN{n:04}</AccessKeyId><SecretAccessKey>fake-chained-secret-{n}</SecretAccessKey>
+      <SessionToken>fake-chained-token-{n}</SessionToken><Expiration>{expiration}</Expiration>
+    </Credentials>
+    <AssumedRoleUser><Arn>{assumed_arn}</Arn><AssumedRoleId>AROAFAKE:{session_name}</AssumedRoleId></AssumedRoleUser>
+  </AssumeRoleResult>
+  <ResponseMetadata><RequestId>fake-chained-{n}</RequestId></ResponseMetadata>
+</AssumeRoleResponse>"#
+    );
+    ([(header::CONTENT_TYPE, "text/xml")], xml).into_response()
+}
+
+/// Now plus `DurationSeconds` (else `default_seconds`), in the format of STS.
+fn expiration(params: &BTreeMap<String, String>, default_seconds: i64) -> String {
+    let seconds: i64 = params
+        .get("DurationSeconds")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default_seconds);
+    jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(seconds))
+        .expect("expiration is in range")
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 /// Read the access key ID from `AWS4-HMAC-SHA256 Credential=<AKID>/...`.
