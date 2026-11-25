@@ -438,8 +438,8 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
                 // The change can stop and start the session; a failed restart keeps the change.
                 s.refresh();
             }
-            Msg::RenameDone { profile_id, result } => {
-                views::settings_dialog::rename_done(s, profile_id, result);
+            Msg::RenameDone { token, result } => {
+                views::settings_dialog::rename_done(s, token, result);
                 // The rename can stop and start sessions, and their rows show the new name.
                 s.refresh();
             }

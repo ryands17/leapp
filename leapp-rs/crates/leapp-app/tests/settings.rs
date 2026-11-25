@@ -3,7 +3,7 @@
 mod common;
 
 use common::{AppHarness, iam_user};
-use leapp_core::{SessionId, Workspace};
+use leapp_core::{SessionId, SessionStatus, Workspace};
 use rune::{Key, KeyEvent, Mods};
 use uuid::Uuid;
 
@@ -229,4 +229,90 @@ fn the_default_profile_has_no_rename_or_delete() {
     assert!(!h.has(&format!("btn-profile-delete-{default}")));
     assert!(h.has(&format!("btn-profile-rename-{dev}")));
     assert!(h.has(&format!("btn-profile-delete-{dev}")));
+}
+
+#[test]
+fn a_late_result_of_an_old_rename_does_not_change_a_new_rename() {
+    let (mut h, ()) = AppHarness::with_setup(|l| {
+        l.create_profile("dev").unwrap();
+    });
+    let id = profile_id(&h.leapp.workspace(), "dev");
+    let field = format!("fld-profile-rename-{id}");
+    open_profiles(&mut h);
+
+    // Rename 1 waits for a worker. The user closes the dialog while it runs.
+    h.tap(&format!("btn-profile-rename-{id}"));
+    h.tap(&field);
+    select_all(&mut h);
+    h.type_text("stage");
+    let workers = h.hold_workers();
+    h.tap(&format!("btn-profile-rename-save-{id}"));
+    h.tap("btn-settings-close");
+    assert!(!h.has("dlg-settings"));
+
+    // The user opens the dialog again and starts rename 2 of the same profile.
+    open_profiles(&mut h);
+    h.tap(&format!("btn-profile-rename-{id}"));
+    assert!(h.has(&field), "rename 2 is open");
+    h.tap(&field);
+    select_all(&mut h);
+    h.type_text("qa");
+
+    // Rename 1 ends. Its result and a key press of the user arrive in the same frame.
+    workers.open();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while h.leapp.workspace().profile_name(id) != Some("stage") {
+        assert!(std::time::Instant::now() < deadline, "rename 1 did not end");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Give the task that sends the result the time to send it.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    h.rt.key(KeyEvent {
+        key: Key::Text("x".into()),
+        mods: Mods::default(),
+    });
+    h.frames(3);
+
+    assert!(h.has(&field), "rename 2 stays open");
+    assert_eq!(h.text_of(&field).as_deref(), Some("qax"), "the typed name");
+    assert!(
+        !h.is_disabled(&format!("btn-profile-rename-save-{id}")),
+        "rename 2 is not saving"
+    );
+    assert!(!h.has("toast-error"), "rename 1 had no error");
+}
+
+#[test]
+fn a_rename_that_must_wait_keeps_the_typed_name() {
+    let (mut h, sid) = with_session_on_dev();
+    let id = profile_id(&h.leapp.workspace(), "dev");
+    // The start of the session waits in the secret store: the session is Pending.
+    let gate = h.store.hold_sets();
+    h.tap(&format!("status-{sid}"));
+    h.settle(|ui| ui.workspace().session(sid).unwrap().status == SessionStatus::Pending);
+
+    open_profiles(&mut h);
+    h.tap(&format!("btn-profile-rename-{id}"));
+    let field = format!("fld-profile-rename-{id}");
+    h.tap(&field);
+    select_all(&mut h);
+    h.type_text("stage");
+    h.tap(&format!("btn-profile-rename-save-{id}"));
+    let err = format!("err-profile-rename-{id}");
+    h.settle_with(|h| h.has(&err) || h.has("toast-error"));
+    gate.open();
+
+    assert!(h.has(&field), "the field stays open");
+    assert_eq!(
+        h.text_of(&field).as_deref(),
+        Some("stage"),
+        "the typed name"
+    );
+    assert_eq!(
+        h.text_of(&err).as_deref(),
+        Some("Another session with the same named profile is starting"),
+        "the error shows under the field"
+    );
+    assert!(!h.is_disabled(&format!("btn-profile-rename-save-{id}")));
+    assert_eq!(h.leapp.workspace().profile_name(id), Some("dev"));
 }

@@ -63,6 +63,8 @@ pub struct FlakyStore {
     /// Number of `set` calls that still succeed before one fails. `None`: no failure.
     sets_before_failure: Mutex<Option<usize>>,
     gates: Mutex<Vec<(String, Gate)>>,
+    /// Gates that hold only the next `get` of a matching key.
+    once_gates: Mutex<Vec<(String, Gate)>>,
     delete_gates: Mutex<Vec<(String, Gate)>>,
     set_gates: Mutex<Vec<(String, Gate)>>,
     /// The next `get` of this key panics.
@@ -84,6 +86,17 @@ impl FlakyStore {
     pub fn block_get(&self, key_prefix: &str) -> Gate {
         let gate = Gate::default();
         self.gates
+            .lock()
+            .unwrap()
+            .push((key_prefix.to_string(), gate.clone()));
+        gate
+    }
+
+    /// Only the next `get` of a key that starts with `key_prefix` waits until the gate opens.
+    /// Later gets of it do not wait.
+    pub fn block_next_get(&self, key_prefix: &str) -> Gate {
+        let gate = Gate::default();
+        self.once_gates
             .lock()
             .unwrap()
             .push((key_prefix.to_string(), gate.clone()));
@@ -128,6 +141,16 @@ fn pass_gates(gates: &Mutex<Vec<(String, Gate)>>, key: &str) {
 impl SecretStore for FlakyStore {
     fn get(&self, key: &str) -> Result<Option<String>> {
         pass_gates(&self.gates, key);
+        let once = {
+            let mut once = self.once_gates.lock().unwrap();
+            let at = once
+                .iter()
+                .position(|(prefix, _)| key.starts_with(prefix.as_str()));
+            at.map(|i| once.remove(i).1)
+        };
+        if let Some(gate) = once {
+            gate.pass();
+        }
         let armed = {
             let mut armed = self.panic_on_get.lock().unwrap();
             armed.take_if(|k| *k == key).is_some()

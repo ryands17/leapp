@@ -28,9 +28,9 @@ pub enum Msg {
     /// The create or save of the session form ended. `poll` closes the form, or shows the error
     /// in it.
     FormDone(Result<(), leapp_core::Error>),
-    /// The rename of the named profile `profile_id` that the Settings dialog asked for ended.
+    /// The rename of a named profile that the Settings dialog sent with `token` ended.
     RenameDone {
-        profile_id: uuid::Uuid,
+        token: u64,
         result: Result<(), leapp_core::Error>,
     },
     /// The change of region or named profile that a change dialog sent with `token` ended.

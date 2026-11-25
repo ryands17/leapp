@@ -53,14 +53,14 @@ pub(crate) enum Tab {
     Profiles,
 }
 
-/// The open rename of one profile.
+/// The open rename of one profile. Its name field is [`SettingsState::rename_name`].
 #[derive(Debug)]
 pub(crate) struct Rename {
     profile_id: Uuid,
-    name: TextEdit,
     error: Option<String>,
-    /// True while core renames the profile, off the render thread.
-    saving: bool,
+    /// The token of the rename that core does now, off the render thread. Only the result with
+    /// this token goes to this rename.
+    saving: Option<u64>,
 }
 
 /// The question "delete this profile?".
@@ -85,6 +85,12 @@ pub(crate) struct SettingsState {
     new_profile: TextEdit,
     new_profile_error: Option<String>,
     rename: Option<Rename>,
+    /// The name field of the open rename. It is outside `rename`, so that the field's `on_edit`
+    /// always has a field to return, also after the rename closes.
+    rename_name: TextEdit,
+    /// The token of the next rename. It stays when the dialog closes and opens again, so a late
+    /// result of an old rename never matches a new one.
+    next_rename_token: u64,
     pub(crate) delete: Option<DeleteProfileAsk>,
 }
 
@@ -93,6 +99,7 @@ pub(crate) fn open(s: &mut Ui) {
     s.settings = SettingsState {
         open: true,
         region: RegionChoice::new(s.ws.settings.default_region.as_str()),
+        next_rename_token: s.settings.next_rename_token,
         ..SettingsState::default()
     };
 }
@@ -105,7 +112,10 @@ pub(crate) fn open_profiles(s: &mut Ui) {
 
 /// Closes the dialog. A rename that runs still ends; its error shows in the toast.
 fn close(s: &mut Ui) {
-    s.settings = SettingsState::default();
+    s.settings = SettingsState {
+        next_rename_token: s.settings.next_rename_token,
+        ..SettingsState::default()
+    };
 }
 
 fn show_tab(s: &mut Ui, tab: Tab) {
@@ -143,7 +153,11 @@ fn add_profile(s: &mut Ui, _tx: &mut Tx) {
 /// Opens the rename field of profile `profile_id`, filled with its name and focused. Ignored
 /// while a rename runs.
 fn start_rename(s: &mut Ui, profile_id: Uuid) {
-    if s.settings.rename.as_ref().is_some_and(|r| r.saving) {
+    if s.settings
+        .rename
+        .as_ref()
+        .is_some_and(|r| r.saving.is_some())
+    {
         return;
     }
     let Some(name) = s.ws.profile_name(profile_id) else {
@@ -151,23 +165,26 @@ fn start_rename(s: &mut Ui, profile_id: Uuid) {
     };
     let mut name = TextEdit::new(name);
     name.focused = true;
+    s.settings.rename_name = name;
     s.settings.rename = Some(Rename {
         profile_id,
-        name,
         error: None,
-        saving: false,
+        saving: None,
     });
 }
 
 /// Renames the profile off the render thread: a session on it can stop and start again, and
 /// the start can ask a question. [`rename_done`] gets the result.
 fn save_rename(s: &mut Ui, _tx: &mut Tx) {
-    let Some(rename) = s.settings.rename.as_mut().filter(|r| !r.saving) else {
+    let st = &mut s.settings;
+    let Some(rename) = st.rename.as_mut().filter(|r| r.saving.is_none()) else {
         return;
     };
-    rename.saving = true;
+    let token = st.next_rename_token;
+    st.next_rename_token = token.wrapping_add(1);
+    rename.saving = Some(token);
     let profile_id = rename.profile_id;
-    let name = rename.name.text.clone();
+    let name = st.rename_name.text.clone();
     let leapp = s.leapp.clone();
     let bridge = s.bridge.clone();
     let task =
@@ -179,34 +196,35 @@ fn save_rename(s: &mut Ui, _tx: &mut Tx) {
                 "the rename stopped unexpectedly; try again",
             )))
         });
-        bridge.send(Msg::RenameDone { profile_id, result });
+        bridge.send(Msg::RenameDone { token, result });
     });
 }
 
-/// The result of [`save_rename`]. A name error shows under the field, which stays open. Any
-/// other error shows in the toast: a failed restart keeps the new name (F23-R4).
-pub(crate) fn rename_done(s: &mut Ui, profile_id: Uuid, result: leapp_core::Result<()>) {
-    let field = s
+/// The result of the rename with `token` ([`save_rename`]). A name error, or a "try again"
+/// error (`ProfilePending`), shows under the field, which stays open with the typed name. Any
+/// other error shows in the toast and closes the field: a failed restart keeps the new name
+/// (F23-R4). A result of another rename (from before a close of the dialog) only shows its
+/// error in the toast.
+pub(crate) fn rename_done(s: &mut Ui, token: u64, result: leapp_core::Result<()>) {
+    let Some(rename) = s
         .settings
         .rename
         .as_mut()
-        .filter(|r| r.profile_id == profile_id);
-    match (result, field) {
-        (Err(Error::InvalidInput { message, .. }), Some(rename)) => {
-            rename.saving = false;
-            rename.error = Some(message);
+        .filter(|r| r.saving == Some(token))
+    else {
+        if let Err(e) = result {
+            s.show_error(e.to_string());
         }
-        (result, _) => {
-            if s.settings
-                .rename
-                .as_ref()
-                .is_some_and(|r| r.profile_id == profile_id)
-            {
-                s.settings.rename = None;
-            }
-            if let Err(e) = result {
-                s.show_error(e.to_string());
-            }
+        return;
+    };
+    rename.saving = None;
+    match result {
+        Ok(()) => s.settings.rename = None,
+        Err(Error::InvalidInput { message, .. }) => rename.error = Some(message),
+        Err(e @ Error::ProfilePending(_)) => rename.error = Some(e.to_string()),
+        Err(e) => {
+            s.settings.rename = None;
+            s.show_error(e.to_string());
         }
     }
 }
@@ -238,7 +256,7 @@ fn answer_delete(s: &mut Ui, yes: bool) {
         if s.settings
             .rename
             .as_ref()
-            .is_some_and(|r| r.profile_id == ask.profile_id && !r.saving)
+            .is_some_and(|r| r.profile_id == ask.profile_id && r.saving.is_none())
         {
             s.settings.rename = None;
         }
@@ -408,19 +426,12 @@ fn profile_row(st: &SettingsState, profile: &NamedProfile, k: &Kit) -> El {
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted);
     if let Some(rename) = renaming {
-        let input = TextInput::new(&rename.name)
+        let input = TextInput::new(&st.rename_name)
             .label("Profile name")
             .width(Some(FIELD_WIDTH))
             .invalid(rename.error.is_some())
-            .disabled(rename.saving)
-            .on_edit(|s: &mut Ui| {
-                &mut s
-                    .settings
-                    .rename
-                    .as_mut()
-                    .expect("the rename field exists only while a rename is open")
-                    .name
-            })
+            .disabled(rename.saving.is_some())
+            .on_edit(|s: &mut Ui| &mut s.settings.rename_name)
             .on_change(|s: &mut Ui, _tx: &mut Tx| {
                 if let Some(r) = s.settings.rename.as_mut() {
                     r.error = None;
@@ -435,7 +446,7 @@ fn profile_row(st: &SettingsState, profile: &NamedProfile, k: &Kit) -> El {
         }
         r = r.py(4.0).child(left).child(
             Button::new("Save")
-                .disabled(rename.saving)
+                .disabled(rename.saving.is_some())
                 .on_press_tx(save_rename)
                 .build(k)
                 .key(format!("btn-profile-rename-save-{id}")),

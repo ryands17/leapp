@@ -5,14 +5,14 @@ use uuid::Uuid;
 
 use super::edit::{Editing, changed_meanwhile};
 use super::iam_user::{Issued, aws_message, expiration_of, session_region};
-use super::{pending_error, pending_on, profile_name};
+use super::{parent_editing_error, pending_error, pending_on, profile_name};
 use crate::aws_files::SectionBody;
 use crate::error::{Error, Field, Result};
 use crate::model::{
     IamRoleChainedUpdate, NewIamRoleChained, Session, SessionId, SessionKind, SessionStatus,
-    Workspace, role_arn_account,
+    role_arn_account,
 };
-use crate::{Leapp, check_profile_chars, check_region, profile_id_for, required, store};
+use crate::{Leapp, State, check_profile_chars, check_region, profile_id_for, required, store};
 
 /// The `DurationSeconds` of each `AssumeRole` call (spec 10.5).
 pub const ASSUME_ROLE_DURATION: i32 = 3600;
@@ -26,10 +26,12 @@ const EXTERNAL_ID_EXTRA: &str = "+=,.@:/_-";
 
 impl Leapp {
     /// Adds an `Inactive` IAM Role Chained session. The parent must exist. A new session cannot
-    /// be in a loop, so no loop check is needed.
+    /// be in a loop, so no loop check is needed. A parent that an edit, a change or a delete
+    /// holds gives `Error::ProfilePending` and changes nothing: else a delete of the chain can
+    /// remove the new session.
     pub fn create_iam_role_chained(&self, req: NewIamRoleChained) -> Result<SessionId> {
         let mut state = self.state.lock().unwrap();
-        let valid = validate(&state.ws, &req, None)?;
+        let valid = validate(&state, &req, None)?;
 
         let id = Uuid::new_v4();
         let mut next = state.ws.clone();
@@ -59,7 +61,8 @@ impl Leapp {
     /// `Error::ProfilePending` and changes nothing. `update_iam_user` is the edit of an IAM User
     /// session: this function returns `Error::WrongSessionType` for one.
     ///
-    /// The parent is checked again in the critical section that saves, because a delete or an
+    /// A new parent that an edit, a change or a delete holds gives `Error::ProfilePending`. The
+    /// parent is checked again in the critical section that saves, because a delete or an
     /// edit may change the chain while the session stops. If that check or the save fails after
     /// the stop, the session stays `Inactive` and the error is returned. If the restart fails,
     /// the edit stays saved and the session is `Inactive`; the error of the start is returned.
@@ -79,7 +82,7 @@ impl Leapp {
             if !matches!(session.kind, SessionKind::IamRoleChained { .. }) {
                 return Err(Error::WrongSessionType(id));
             }
-            let valid = validate(&state.ws, &req, Some(id))?;
+            let valid = validate(&state, &req, Some(id))?;
             if session.status == SessionStatus::Pending {
                 return Err(pending_error());
             }
@@ -118,7 +121,7 @@ impl Leapp {
                 Some(s) if s.status != expected => return Err(changed_meanwhile()),
                 Some(_) => {}
             }
-            let valid = validate(&state.ws, &req, Some(id))?;
+            let valid = validate(&state, &req, Some(id))?;
             let mut next = state.ws.clone();
             let profile_id = profile_id_for(&mut next, valid.profile);
             let session = next
@@ -267,12 +270,12 @@ struct Valid<'a> {
 /// form fields. `edited` is the session of an edit: its new parent must not be the session itself
 /// or a session below it.
 fn validate<'a>(
-    ws: &Workspace,
+    state: &State,
     req: &'a NewIamRoleChained,
     edited: Option<SessionId>,
 ) -> Result<Valid<'a>> {
     let name = required(Field::Name, &req.name)?;
-    check_parent(ws, req.parent_session_id, edited)?;
+    check_parent(state, req.parent_session_id, edited)?;
     let role_arn = req.role_arn.trim();
     if role_arn_account(role_arn).is_none() {
         return Err(Error::InvalidInput {
@@ -307,14 +310,20 @@ fn validate<'a>(
     })
 }
 
-/// The parent must exist; for an edit of `edited`, it must also not make a loop.
-fn check_parent(ws: &Workspace, parent: SessionId, edited: Option<SessionId>) -> Result<()> {
+/// The parent must exist; for an edit of `edited`, it must also not make a loop. A parent that
+/// an `Editing` reservation holds gives `Error::ProfilePending`. A delete reserves its session
+/// and every session below it, so a check of the parent alone also finds a delete of any
+/// session above the parent.
+fn check_parent(state: &State, parent: SessionId, edited: Option<SessionId>) -> Result<()> {
+    let ws = &state.ws;
     let message = if ws.session(parent).is_none() {
         "session not found"
     } else if edited == Some(parent) {
         "must not be the session itself"
     } else if edited.is_some_and(|id| ws.descendants(id).contains(&parent)) {
         "would make a loop of chained sessions"
+    } else if state.editing.contains(&parent) {
+        return Err(parent_editing_error());
     } else {
         return Ok(());
     };

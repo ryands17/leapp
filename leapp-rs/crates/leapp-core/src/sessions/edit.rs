@@ -159,7 +159,7 @@ impl Leapp {
             } else {
                 SessionStatus::Inactive
             };
-            match state.ws.session(id) {
+            let saved = match state.ws.session(id) {
                 None => Err(Error::NotFound(id)),
                 Some(s) if s.status != expected => Err(changed_meanwhile()),
                 Some(_) => {
@@ -187,16 +187,17 @@ impl Leapp {
                             *account = None;
                         }
                     }
-                    store::save(&self.workspace_path, &next).map(|()| {
-                        state.ws = next;
-                        // A token of the old keys or the old MFA device that a chained start
-                        // still gets for this session must not get an expiration (F23-R7).
-                        if keys_changed || mfa_changed {
-                            *state.key_generation.entry(id).or_default() += 1;
-                        }
-                    })
+                    store::save(&self.workspace_path, &next).map(|()| state.ws = next)
                 }
+            };
+            // A token of the old keys or the old MFA device that a chained start still gets
+            // for this session must not get an expiration (F23-R7). If the save failed, a start
+            // can have read the new keys before the undo below: its token must not be kept
+            // either (F1-R4). A bump that is not necessary only makes a start get a new token.
+            if keys_changed || mfa_changed {
+                *state.key_generation.entry(id).or_default() += 1;
             }
+            saved
         };
         if let Err(e) = saved {
             if let Some(change) = &key_change {

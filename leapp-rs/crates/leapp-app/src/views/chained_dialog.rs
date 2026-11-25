@@ -307,7 +307,10 @@ pub(crate) fn done(s: &mut Ui, token: u64, result: leapp_core::Result<()>) {
 }
 
 /// A text field of the form, keyed `key`, with its error `err` under it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one part of the field; a struct only for this call adds no clarity"
+)]
 fn text_field(
     k: &Kit,
     label: &str,

@@ -60,20 +60,34 @@ F2 and F3 are done on branch `leapp-rs-f2-f3` (not yet merged).
   `tests/settings.rs` and `the_form_preselects_the_default_region` in `tests/profiles_field.rs`):
   the default region is a setting; the forms use it.
 
-Deferred by the F2 and F3 reviews (open; the final review decides):
+Deferred by the F2 and F3 reviews and the final review (open unless marked done):
 
 - Profiles: a profile named `__new__` shares the key `sel-profile-option-__new__` with the create
   option. No test for an unchanged-profile edit, or for "default " with no create option.
-- Profiles: a stale `RenameDone` (close, reopen, rename again) matches only by profile ID and can
-  clear the new rename. Fix: a rename token, and no `expect`.
-- Profiles: a profile delete can be submitted twice; `ProfilePending` closes the rename field and
-  loses the typed name; a failed `update_settings` leaves the select on the unsaved value; the tabs
-  have no selected state for accessibility.
+- Done (final fix wave, tests `a_late_result_of_an_old_rename_does_not_change_a_new_rename` and
+  `a_rename_that_must_wait_keeps_the_typed_name` in `tests/settings.rs`): each rename has a token,
+  so a stale `RenameDone` does not change a new rename; the rename field has no `expect`; a
+  `ProfilePending` result keeps the rename field open with the typed name and shows the error
+  under it (final review I1, M1).
+- Profiles: a profile delete can be submitted twice, and the second delete shows
+  `ProfileNotFound` with the profile UUID in the toast (final review M4: use the name, or ignore
+  `ProfileNotFound` after a delete). A failed `update_settings` leaves the select on the unsaved
+  value; the tabs have no selected state for accessibility.
+- Profiles: `update_settings` and `create_profile` run on the render thread and take the core
+  lock. With the keychain write under the lock (see F3), a slow keychain call freezes the UI also
+  through them (final review M3).
 - Profiles (core): `delete_profile` refuses when a default session is `Pending`. A user stop during
   a change is undone (same as `update_iam_user`). The chmod tests fail as root.
 - Change region and profile dialogs: Cancel and close are locked while a change saves (a hung AWS
   call keeps the dialog up until the STS timeout, 10 s). No test for a change whose restart asks
-  MFA or overwrite. The `InvalidInput` match is not field-specific.
+  MFA or overwrite. The `InvalidInput` match is not field-specific. Unused `_tx` in `save`.
+- Core (Task 1): T1-m2, the F23-R3 no-op check and the target-profile `Pending` check of
+  `change_profile` run in their own critical section before `change_sessions` (a race gives a
+  `ProfilePending` restart error with the change saved). T1-m6, T1-m7, T1-m8: the ledger has no
+  text for them, and the final review found no defect; read the Task 1 review again before F4.
+- Core (Task 2): T2-m2, T2-m3, T2-m4, T2-m6 to T2-m9: the ledger has no text. The implementer's
+  concerns: no test for the stop-failure path of `change_sessions` or for
+  `no_other_session_runs_on`, and a second overwrite question after a failed restart.
 
 ## F3 (IAM Role Chained)
 
@@ -81,24 +95,43 @@ F3 is done on branch `leapp-rs-f2-f3` (commits `6c6e9e8c`, `8bd44738`, `4158f4b9
 `4d555fdf`, `ee9ef0cf`). Tests: `crates/leapp-core/tests/chained.rs`,
 `crates/leapp-app/tests/chained.rs`, `crates/leapp-app/tests/row_menu.rs`.
 
-Deferred by the F3 reviews (open; the final review decides):
+Deferred by the F3 reviews and the final review (open unless marked done):
 
-- Core: two parallel fresh parent tokens can split the keychain token and its expiry. A failed edit
-  can leave a reusable token of rejected keys. The MFA-only test also changes the region.
+- Done (final fix wave, test `a_parent_token_of_keys_from_a_failed_edit_is_not_kept`): an edit of
+  the keys or the MFA device bumps the key generation also when its save fails, so a parent token
+  of the rejected keys is not kept or reused (F1-R4, final review I3).
+- Done (final fix wave, tests `a_create_under_a_chain_that_a_delete_holds_is_refused` and
+  `an_edit_to_a_parent_that_a_delete_holds_is_refused`): `check_parent` refuses a parent that an
+  `Editing` reservation holds with `ProfilePending`, so a delete cannot remove a session that was
+  just created or moved under its chain (final review I2).
+- Done (final fix wave): `CLAUDE.md` has the real change-dialog keys, the option keys
+  (`<select key>-option-<value>`, `sel-parent-option-<session id>`), the row menu labels, the
+  true statement about the `Editing` reservation, and the scenes line wrapped (T11-1 to T11-3,
+  final review I4, M5).
+- Done (final fix wave): `#[expect(clippy::too_many_arguments, reason = ...)]` on `text_field` in
+  `chained_dialog.rs` (T9-m3, final review M2).
+- Core: two parallel fresh parent tokens can split the keychain token and its expiry. The
+  MFA-only test also changes the region.
 - Core: `save_parent_token` writes to the keychain under the core state `Mutex`. A blocking
   keychain prompt would freeze the UI, which reads the workspace each frame. Option: a per-parent
-  write lock.
-- Core: a create or edit under a chain that a delete holds succeeds, then the delete removes it.
-  Fix: `check_parent` refuses a held parent. No test for the cascade stop order.
+  write lock. F4 must decide this before it copies the pattern (see the `CLAUDE.md` gotcha).
+- Core: no test for the cascade stop order.
+- Core: `update_iam_user` writes the new keys before the save. If the second key write fails,
+  `KeyChange::write` undoes the first one but does not bump the key generation, so a chained start
+  that reads the first new key in that window can keep a token of it (the same F1-R4 gap as I3,
+  on the write-failure path).
+- Core (Task 3): T3-m1, T3-m3, T3-m4, T3-m5: the ledger has no text, and the final review found no
+  defect in `chained.rs`. Read the Task 3 review again before F4.
+- Core (Task 4): T4-m5 (ruled, no change): the missing-parent message names the session whose
+  parent is missing, not the session that was started. It is accurate for a deep chain.
 - Core: `update_iam_role_chained` copies about 40 lines of the `update_iam_user` skeleton. The
   `From<IamRoleChainedUpdate>` impl, the `Editing` doc comment and the duplicated `modes_are_ignored`
   need a rust-review clean-up.
 - App: label case differs between forms ("Named profile" and "Session alias" in the chained form;
   "Named Profile" and "Session Alias" in the IAM User form). Parent options with the same name
   cannot be told apart. No app test for `err-parent`, `err-chained-name`, `err-chained-form`.
-- App: `#[allow(clippy::too_many_arguments)]` has no reason. `purple()` is in `chained_dialog.rs`,
-  not next to `orange()`. Unused `Tx` in `submit`. `request()` checks the parent again.
-  `ChainedForm::is_open` has no doc.
+- App: `purple()` is in `chained_dialog.rs`, not next to `orange()`. Unused `Tx` in `submit`.
+  `request()` checks the parent again. `ChainedForm::is_open` has no doc.
 - App: the delete count is frozen when the confirm opens (compute it in `build` from
   `ws.descendants`). A chained `open_edit` with an unknown profile gives an empty profile. The
   `chained()` test helper is copied in two test files. No stale-token test for a chained create or

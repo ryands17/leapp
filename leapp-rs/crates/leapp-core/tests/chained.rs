@@ -1154,3 +1154,164 @@ async fn a_delete_whose_stop_fails_removes_nothing() {
     assert_eq!(keys_of(&h, p).len(), 3);
     assert_eq!(h.credentials_text(), before);
 }
+
+/// A delete of `P` holds its chain: the stop of the child `C` waits at the delete of the user's
+/// backup of `ci`. Meanwhile, `during` runs. Returns what `during` returned, and the delete must
+/// succeed.
+fn while_a_delete_holds_the_chain<T: Send>(
+    h: &Harness,
+    store: &FlakyStore,
+    p: SessionId,
+    during: impl FnOnce() -> T + Send,
+) -> T {
+    let gate = store.block_delete("aws-profile-backup-ci");
+    let leapp = &h.leapp;
+    let (deleted, out) = std::thread::scope(|scope| {
+        let deleter = scope.spawn(|| block_on(leapp.delete_session(p)));
+        gate.wait_blocked();
+        let out = within_time(scope, &gate, during);
+        gate.open();
+        (deleter.join().unwrap(), out)
+    });
+    deleted.unwrap();
+    out
+}
+
+/// An active chain `P` -> `C` (with the user's own `ci` section backed up), and its harness.
+async fn active_chain_with_backup() -> (Harness, Arc<FlakyStore>, SessionId, SessionId) {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    h.write_credentials("[ci]\naws_access_key_id = MINE\n");
+    h.prompter.answer(true);
+    let (p, c) = parent_and_child(&h, |_| {});
+    h.leapp.start(c).await.unwrap();
+    (h, store, p, c)
+}
+
+/// A create under a session that a delete holds is refused: else the delete removes the new
+/// session after the user saw it created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_create_under_a_chain_that_a_delete_holds_is_refused() {
+    let (h, store, p, c) = active_chain_with_backup().await;
+
+    let created = while_a_delete_holds_the_chain(&h, &store, p, || {
+        [p, c].map(|parent| h.leapp.create_iam_role_chained(chained("N", parent, "qa")))
+    });
+
+    for result in created {
+        assert!(
+            matches!(result, Err(Error::ProfilePending(_))),
+            "{result:?}"
+        );
+    }
+    assert!(
+        h.leapp.workspace().sessions.is_empty(),
+        "the delete removed the chain, and no session was created"
+    );
+}
+
+/// An edit that moves a session under a session that a delete holds is refused and changes
+/// nothing: else the delete removes the edited session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_to_a_parent_that_a_delete_holds_is_refused() {
+    let (h, store, p, c) = active_chain_with_backup().await;
+    let o = h.leapp.create_iam_user(h.iam_user("O", "other")).unwrap();
+    let d = h
+        .leapp
+        .create_iam_role_chained(chained("D", o, "qa"))
+        .unwrap();
+    let mut req = same_as_now(&h, d);
+    req.parent_session_id = c;
+
+    let edited = while_a_delete_holds_the_chain(&h, &store, p, || {
+        block_on(h.leapp.update_iam_role_chained(d, req))
+    });
+
+    assert!(
+        matches!(edited, Err(Error::ProfilePending(_))),
+        "{edited:?}"
+    );
+    let ws = h.leapp.workspace();
+    assert!(ws.session(c).is_none(), "the delete removed the chain");
+    let SessionKind::IamRoleChained {
+        parent_session_id, ..
+    } = &ws.session(d).expect("the edited session is kept").kind
+    else {
+        panic!("not a chained session");
+    };
+    assert_eq!(*parent_session_id, o, "the edit changed nothing");
+}
+
+/// A chained start reads the parent's new keys while an edit of the parent writes them, and the
+/// save of that edit then fails: the edit puts the old keys back. The parent token that the start
+/// gets with the rejected keys must not be kept or reused (F1-R4).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_token_of_keys_from_a_failed_edit_is_not_kept() {
+    if modes_are_ignored() {
+        eprintln!("skipped: this process ignores folder modes");
+        return;
+    }
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let (p, c) = parent_and_child(&h, |_| {});
+    let ws_dir = h.home.path().join(".leapp-rs");
+    // The start reads the parent's keys only after the edit wrote the new access key ID. The
+    // edit's own read of the old keys does not wait.
+    let read_gate = store.block_next_get(&format!("iam-user-{p}-access-key-id"));
+    // The edit waits before it writes the new secret key, so before its save. So the start
+    // gets its token with the new access key ID, which the edit never saves.
+    let write_gate = store.block_set(&format!("iam-user-{p}-secret-access-key"));
+    h.fake
+        .delay_next("GetSessionToken", std::time::Duration::from_secs(2));
+
+    let leapp = &h.leapp;
+    let fake = &h.fake;
+    let (started, edited, edit_ended_first) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| block_on(leapp.start(c)));
+        read_gate.wait_blocked();
+        // The save of the edit fails: the workspace folder is read-only.
+        common::set_mode(&ws_dir, 0o500);
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(p, new_keys_for_p(None))));
+        write_gate.wait_blocked();
+        read_gate.open();
+        let sent = std::time::Instant::now();
+        while fake.count("GetSessionToken") == 0 {
+            if sent.elapsed().as_secs() >= 5 {
+                // Open the gate first, so that the edit ends and the test does not hang.
+                write_gate.open();
+                panic!("no GetSessionToken came");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        write_gate.open();
+        let edited = editor.join().unwrap();
+        common::set_mode(&ws_dir, 0o700);
+        let edit_ended_first = !starter.is_finished();
+        (starter.join().unwrap(), edited, edit_ended_first)
+    });
+
+    assert!(edit_ended_first, "the start ended first: no race was made");
+    assert!(matches!(edited, Err(Error::Io(_))), "{edited:?}");
+    assert_eq!(
+        token_call_keys(&h),
+        [Some("AKID-NEW".to_string())],
+        "the start got its token with the rejected key"
+    );
+    started.unwrap();
+    assert_eq!(
+        h.secrets
+            .snapshot()
+            .get(&format!("iam-user-{p}-access-key-id"))
+            .map(String::as_str),
+        Some("AKID-P"),
+        "the failed edit put the old key back"
+    );
+    assert_eq!(expiration(&h, p), None, "the token got an expiration");
+    assert!(
+        !h.secrets
+            .snapshot()
+            .contains_key(&format!("iam-user-{p}-session-token")),
+        "the token of the rejected keys is in the keychain"
+    );
+}

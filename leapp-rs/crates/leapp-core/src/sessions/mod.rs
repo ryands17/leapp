@@ -732,7 +732,7 @@ fn editing_error() -> Error {
     Error::ProfilePending("The session is being changed. Try again.".into())
 }
 
-fn parent_editing_error() -> Error {
+pub(crate) fn parent_editing_error() -> Error {
     Error::ProfilePending("A session above this session is being changed. Try again.".into())
 }
 
