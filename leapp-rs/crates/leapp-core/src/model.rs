@@ -16,6 +16,24 @@ pub struct Workspace {
     pub profiles: Vec<NamedProfile>,
     #[serde(default)]
     pub managed_profiles: BTreeMap<String, ManagedProfile>,
+    /// Missing in files from F0 and F1: the defaults.
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+/// The app settings that are saved in `workspace.json`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Settings {
+    /// The region that the create forms show first.
+    pub default_region: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            default_region: crate::regions::DEFAULT_REGION.to_string(),
+        }
+    }
 }
 
 impl Workspace {
@@ -29,6 +47,7 @@ impl Workspace {
                 name: DEFAULT_PROFILE.to_string(),
             }],
             managed_profiles: BTreeMap::new(),
+            settings: Settings::default(),
         }
     }
 

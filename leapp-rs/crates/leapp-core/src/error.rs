@@ -30,6 +30,8 @@ impl fmt::Display for Field {
 pub enum Error {
     #[error("session {0} not found")]
     NotFound(Uuid),
+    #[error("named profile {0} not found")]
+    ProfileNotFound(Uuid),
     #[error("invalid {field}: {message}")]
     InvalidInput { field: Field, message: String },
     #[error("{0}")]

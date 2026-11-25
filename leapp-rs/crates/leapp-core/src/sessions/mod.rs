@@ -1,5 +1,6 @@
 //! Start and stop of sessions (spec 10.1, 10.2).
 
+mod change;
 mod edit;
 mod iam_user;
 

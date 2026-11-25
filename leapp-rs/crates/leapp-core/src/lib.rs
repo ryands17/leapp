@@ -4,6 +4,7 @@ mod aws_files;
 mod config;
 mod error;
 mod model;
+mod profiles;
 mod refresh;
 pub mod regions;
 mod secrets;
@@ -20,7 +21,7 @@ pub use config::{Clock, Config, Endpoints, Prompter, SystemClock};
 pub use error::{Error, Field, Result};
 pub use model::{
     IamUserUpdate, ManagedProfile, NamedProfile, NewIamUser, Session, SessionId, SessionKind,
-    SessionStatus, Workspace,
+    SessionStatus, Settings, Workspace,
 };
 pub use refresh::{REFRESH_TICK, RefreshFailure, RefreshReport, SESSION_DURATION};
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};
@@ -73,6 +74,17 @@ impl Leapp {
     /// A copy of the current workspace.
     pub fn workspace(&self) -> Workspace {
         self.state.lock().unwrap().ws.clone()
+    }
+
+    /// Saves the settings. The default region must be one of `regions::REGIONS`.
+    pub fn update_settings(&self, settings: Settings) -> Result<()> {
+        check_region(&settings.default_region)?;
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.ws.clone();
+        next.settings = settings;
+        store::save(&self.workspace_path, &next)?;
+        state.ws = next;
+        Ok(())
     }
 
     pub fn create_iam_user(&self, req: NewIamUser) -> Result<SessionId> {
@@ -157,18 +169,8 @@ fn validate<'a>(
         k1.map(|k| required(f1, k)).transpose()?,
     ];
     let profile = required(Field::Profile, profile)?;
-    if profile.contains(['[', ']', '\n', '\r']) {
-        return Err(Error::InvalidInput {
-            field: Field::Profile,
-            message: "must not contain [, ], or line breaks".into(),
-        });
-    }
-    if !regions::REGIONS.contains(&region) {
-        return Err(Error::InvalidInput {
-            field: Field::Region,
-            message: format!("unknown region \"{region}\""),
-        });
-    }
+    check_profile_chars(profile)?;
+    check_region(region)?;
     let mfa_device = mfa_device
         .map(str::trim)
         .filter(|d| !d.is_empty())
@@ -179,6 +181,27 @@ fn validate<'a>(
         profile,
         mfa_device,
     })
+}
+
+/// The F0 rule for a profile name: it goes in a `[section]` header of the credentials file.
+fn check_profile_chars(profile: &str) -> Result<()> {
+    if profile.contains(['[', ']', '\n', '\r']) {
+        return Err(Error::InvalidInput {
+            field: Field::Profile,
+            message: "must not contain [, ], or line breaks".into(),
+        });
+    }
+    Ok(())
+}
+
+fn check_region(region: &str) -> Result<()> {
+    if !regions::REGIONS.contains(&region) {
+        return Err(Error::InvalidInput {
+            field: Field::Region,
+            message: format!("unknown region \"{region}\""),
+        });
+    }
+    Ok(())
 }
 
 /// The id of the named profile `name`. Adds the profile to `ws` if it is not there.

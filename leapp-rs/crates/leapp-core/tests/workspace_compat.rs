@@ -38,6 +38,8 @@ async fn an_f0_workspace_file_still_loads() {
     assert_eq!(ws.sessions.len(), 1, "the file must load, not move aside");
     assert_eq!(ws.sessions[0].start_time, Some(start));
     assert_eq!(ws.sessions[0].session_token_expiration, Some(expiry));
+    // The F0 and F1 files have no `settings`.
+    assert_eq!(ws.settings.default_region, "us-east-1");
 
     // A save writes the file again. The instants must survive it.
     h.leapp

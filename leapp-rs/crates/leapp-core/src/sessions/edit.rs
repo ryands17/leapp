@@ -262,34 +262,50 @@ impl Leapp {
     }
 }
 
-/// Reserves a session for an edit: a start of it returns `Error::ProfilePending` until the drop.
-/// The drop takes the lock again and removes the mark, on every path. Create it under the lock,
-/// in the same critical section that checks that the session is not `Pending`; drop it only
-/// after the guard is dropped.
-struct Editing<'a> {
+/// Reserves sessions for an edit or a change: a start of any of them returns
+/// `Error::ProfilePending` until the drop. The drop takes the lock again and removes the marks, on
+/// every path. Create it under the lock, in the same critical section that checks that the
+/// sessions are not `Pending`; drop it only after the guard is dropped.
+pub(super) struct Editing<'a> {
     state: &'a Mutex<State>,
-    id: SessionId,
+    ids: Vec<SessionId>,
 }
 
 impl<'a> Editing<'a> {
     /// Marks `id` as reserved. Returns `Error::ProfilePending` if another edit has it.
     fn reserve(state: &'a Mutex<State>, locked: &mut State, id: SessionId) -> Result<Editing<'a>> {
-        if !locked.editing.insert(id) {
+        Self::reserve_all(state, locked, &[id])
+    }
+
+    /// Marks all `ids` as reserved, or none: returns `Error::ProfilePending` if another edit or
+    /// change has one of them. `ids` must hold each id one time.
+    pub(super) fn reserve_all(
+        state: &'a Mutex<State>,
+        locked: &mut State,
+        ids: &[SessionId],
+    ) -> Result<Editing<'a>> {
+        if ids.iter().any(|id| locked.editing.contains(id)) {
             return Err(editing_error());
         }
-        Ok(Editing { state, id })
+        locked.editing.extend(ids.iter().copied());
+        Ok(Editing {
+            state,
+            ids: ids.to_vec(),
+        })
     }
 }
 
 impl Drop for Editing<'_> {
     fn drop(&mut self) {
-        // A poisoned lock still holds valid data here: remove the mark all the same.
+        // A poisoned lock still holds valid data here: remove the marks all the same.
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.editing.remove(&self.id);
+        for id in &self.ids {
+            state.editing.remove(id);
+        }
     }
 }
 
 /// A start or stop of the same session ran while the edit or delete waited.
-fn changed_meanwhile() -> Error {
+pub(super) fn changed_meanwhile() -> Error {
     Error::ProfilePending("The session started or stopped during the change. Try again.".into())
 }
