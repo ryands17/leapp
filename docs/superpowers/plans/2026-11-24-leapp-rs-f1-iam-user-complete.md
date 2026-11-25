@@ -1,5 +1,10 @@
 # Leapp RS F1 (IAM User complete) Implementation Plan
 
+**Status:** Complete. Merged to `master` on 2026-11-25 (merge `e8e60113`). 172 workspace tests
+pass. The owner checked with real AWS: MFA start, `aws sts get-caller-identity`, token reuse,
+refresh after 21 min and the overwrite restore. Not yet checked with real AWS: the row menu and the
+cleanup at quit.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** An IAM User session that is complete: MFA, the token cache with expiry, edit, delete,

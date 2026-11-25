@@ -6,7 +6,8 @@ plans for later features can include them. Each later plan must read its section
 
 ## F1 (IAM user edit/delete, MFA, refresh)
 
-All items are closed on branch `leapp-rs-f1`, or moved (see the last two items).
+F1 is complete and merged to `master` on 2026-11-25 (merge `e8e60113`). All items are closed, or
+moved (see the last two items).
 
 - Done (`c69761cf`, test `a_start_that_waits_on_aws_at_shutdown_leaves_no_backup`): keychain backup
   orphan when you quit during a start. A start checks `closing` before the backup write and
