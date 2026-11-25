@@ -20,6 +20,20 @@ pub enum Msg {
         profile: String,
         reply: oneshot::Sender<bool>,
     },
+    /// The start of session `id` that the UI asked for ended. `error` is for the user.
+    StartDone {
+        id: leapp_core::SessionId,
+        error: Option<String>,
+    },
+    /// The create or save of the session form ended. `poll` closes the form, or shows the error
+    /// in it.
+    FormDone(Result<(), leapp_core::Error>),
+    /// Core asks for the MFA code of the session named `session`. Send the code, or `None` to
+    /// cancel, on `reply`.
+    AskMfa {
+        session: String,
+        reply: oneshot::Sender<Option<String>>,
+    },
 }
 
 /// A channel from any thread to the UI thread. Clones share the same channel and waker.
@@ -92,5 +106,16 @@ impl Prompter for UiPrompter {
             reply,
         });
         answer.await.unwrap_or(false)
+    }
+
+    /// Sends [`Msg::AskMfa`] and waits for the code. No answer (the UI dropped the question)
+    /// means cancel.
+    async fn ask_mfa_code(&self, session_name: &str) -> Option<String> {
+        let (reply, answer) = oneshot::channel();
+        self.bridge.send(Msg::AskMfa {
+            session: session_name.to_string(),
+            reply,
+        });
+        answer.await.ok().flatten()
     }
 }

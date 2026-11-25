@@ -12,6 +12,8 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     let Some(profile) = s.pending_confirm() else {
         return;
     };
+    // Disabled until armed: an early press would be ignored anyway.
+    let disabled = !s.question_armed();
     // The first child holds the profile name: the tests read it as the text of the dialog.
     let body = col()
         .key("dlg-overwrite")
@@ -44,12 +46,14 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .child(
                     Button::new("Cancel")
                         .variant(ButtonVariant::Ghost)
+                        .disabled(disabled)
                         .on_press(|s: &mut Ui| s.answer_confirm(false))
                         .build(k)
                         .key("btn-overwrite-no"),
                 )
                 .child(
                     Button::new("Overwrite")
+                        .disabled(disabled)
                         .on_press(|s: &mut Ui| s.answer_confirm(true))
                         .build(k)
                         .key("btn-overwrite-yes"),

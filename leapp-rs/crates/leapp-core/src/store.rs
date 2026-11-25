@@ -33,7 +33,7 @@ pub fn load(path: &Path) -> Result<Workspace> {
 }
 
 fn move_aside(path: &Path) -> Result<Workspace> {
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let stamp = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%S%.3fZ");
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".broken-{stamp}"));
     std::fs::rename(path, path.with_file_name(name))?;

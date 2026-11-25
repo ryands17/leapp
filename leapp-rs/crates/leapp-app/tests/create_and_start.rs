@@ -11,7 +11,9 @@ fn fill(h: &mut AppHarness, name: &str, key_id: &str, secret: &str) {
         ("fld-secret-key", secret),
     ] {
         h.tap(field);
-        h.type_text(value);
+        if !value.is_empty() {
+            h.type_text(value);
+        }
     }
 }
 
@@ -27,7 +29,7 @@ fn create_dialog_adds_a_session() {
     h.settle(|ui| ui.workspace().sessions.len() == 1);
 
     assert!(!h.has("dlg-iam-user"));
-    let rows = h.keys_with_prefix("row-");
+    let rows = h.row_keys();
     assert_eq!(rows.len(), 1);
     let id = rows[0].strip_prefix("row-").unwrap().to_string();
     assert_eq!(
@@ -62,6 +64,7 @@ fn create_is_blocked_until_required_fields_are_set() {
     let mut h = AppHarness::new();
     h.tap("btn-create");
     h.tap("btn-create-submit");
+    h.settle_with(|h| h.has("err-name"));
 
     assert!(h.has("dlg-iam-user"));
     assert!(h.leapp.workspace().sessions.is_empty());
@@ -80,6 +83,7 @@ fn a_bad_profile_name_shows_under_the_profile_field() {
     h.tap("fld-profile");
     h.type_text("[bad]");
     h.tap("btn-create-submit");
+    h.settle_with(|h| h.has("err-profile"));
 
     assert!(h.has("dlg-iam-user"));
     assert!(h.leapp.workspace().sessions.is_empty());
@@ -194,6 +198,193 @@ fn success_wipes_the_fields() {
     h.tap("btn-create");
     assert!(h.rt.state.create_form().is_blank());
     assert!(!h.has("err-name"));
+}
+
+/// Taps Create Session and waits until the core call ends: `key` shows.
+fn submit_until(h: &mut AppHarness, key: &str) {
+    h.tap("btn-create-submit");
+    h.settle_with(|h| h.has(key));
+}
+
+#[test]
+fn each_input_error_shows_under_its_field() {
+    // No access key.
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    fill(&mut h, "dev", "", "SECRET-dev");
+    submit_until(&mut h, "err-access-key");
+    assert!(!h.has("err-name") && !h.has("err-secret-key") && !h.has("err-form"));
+
+    // No secret key.
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    fill(&mut h, "dev", "AKID-dev", "");
+    submit_until(&mut h, "err-secret-key");
+    assert!(!h.has("err-access-key") && !h.has("err-form"));
+
+    // The secret store fails: the error is not about one field.
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
+    h.store.fail_next_set();
+    submit_until(&mut h, "err-form");
+    assert!(h.text_of("err-form").unwrap().contains("refused the write"));
+    assert!(h.has("dlg-iam-user"), "the dialog stays open");
+    assert!(h.leapp.workspace().sessions.is_empty());
+    assert!(!h.has("err-access-key") && !h.has("err-secret-key"));
+}
+
+#[test]
+fn typing_in_a_field_clears_its_error() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    submit_until(&mut h, "err-name");
+
+    // An edit of another field does not clear the error of the name.
+    h.tap("fld-access-key");
+    h.type_text("A");
+    assert!(h.has("err-name"), "the error of the name stays");
+
+    h.tap("fld-name");
+    h.type_text("d");
+    assert!(!h.has("err-name"), "typing in the name clears its error");
+
+    // The same for a second field: its error goes, the others stay.
+    submit_until(&mut h, "err-secret-key");
+    h.tap("fld-profile");
+    h.type_text("x");
+    assert!(
+        h.has("err-secret-key"),
+        "an edit of the profile keeps the secret key error"
+    );
+    h.tap("fld-secret-key");
+    h.type_text("s");
+    assert!(!h.has("err-secret-key"));
+}
+
+/// The caret x offset inside the text input `key`. Plain glyphs and bullets have different
+/// widths, so it shows if the field draws the secret or masks it.
+fn caret_x(h: &AppHarness, key: &str) -> f32 {
+    let suffix = format!("{key}/value/input");
+    let input =
+        h.rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("no text input {key:?}"));
+    input.caret.expect("the field has a caret")[0] - input.rect[0]
+}
+
+#[test]
+fn the_eye_shows_the_secret() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    h.tap("fld-secret-key");
+    h.type_text("SECRET-dev");
+    h.tap("fld-secret-key");
+    assert!(h.rt.has_secure_focus(), "the secret field is secure");
+    assert!(!h.rt.state.create_form().secret_shown());
+    assert_eq!(
+        h.text_of("btn-secret-eye").as_deref(),
+        Some("Show secret key")
+    );
+
+    let masked_caret = caret_x(&h, "fld-secret-key");
+
+    h.tap("btn-secret-eye");
+    assert!(
+        h.rt.state.create_form().secret_shown(),
+        "the field shows the secret"
+    );
+    assert_eq!(
+        h.text_of("btn-secret-eye").as_deref(),
+        Some("Hide secret key")
+    );
+    h.tap("fld-secret-key");
+    assert!(
+        h.rt.has_secure_focus(),
+        "a shown secret keeps the secure protections"
+    );
+    assert!(
+        !h.tree_contains("SECRET-dev"),
+        "a shown secret is not in the element tree"
+    );
+    assert_ne!(
+        caret_x(&h, "fld-secret-key"),
+        masked_caret,
+        "the field draws plain text, not bullets"
+    );
+
+    h.tap("btn-secret-eye");
+    assert!(
+        !h.rt.state.create_form().secret_shown(),
+        "the field masks the secret again"
+    );
+    assert_eq!(
+        h.text_of("btn-secret-eye").as_deref(),
+        Some("Show secret key")
+    );
+    h.tap("fld-secret-key");
+    assert!(h.rt.has_secure_focus());
+}
+
+#[test]
+fn an_mfa_device_is_saved() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
+    h.tap("fld-mfa-device");
+    h.type_text(common::MFA_DEVICE);
+    h.tap("btn-create-submit");
+    h.settle(|ui| ui.workspace().sessions.len() == 1);
+
+    let leapp_core::SessionKind::IamUser { mfa_device, .. } = &h.leapp.workspace().sessions[0].kind;
+    assert_eq!(mfa_device.as_deref(), Some(common::MFA_DEVICE));
+}
+
+#[test]
+fn the_dialog_fits_the_smallest_window() {
+    let mut h = AppHarness::new();
+    let (min_w, min_h) = leapp_app::spec()
+        .min_size
+        .expect("the window has a minimum size");
+    h.rt.set_viewport((min_w, min_h), 1.0);
+    h.frames(2);
+    h.tap("btn-create");
+    h.frames(30);
+
+    for key in ["btn-create-submit", "btn-create-cancel", "fld-mfa-device"] {
+        let [x, y, w, hgt] = h.rect(key);
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + w <= min_w && y + hgt <= min_h,
+            "{key} {:?} is outside the {min_w} x {min_h} window",
+            [x, y, w, hgt]
+        );
+    }
+}
+
+#[test]
+fn submit_is_disabled_while_the_session_is_saved() {
+    let mut h = AppHarness::new();
+    h.tap("btn-create");
+    assert!(!h.is_disabled("btn-create-submit"));
+    fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
+    let gate = h.store.hold_sets();
+    h.tap("btn-create-submit");
+    h.frames(5);
+
+    // The core call waits in the secret store, off the render thread: the UI still draws.
+    assert!(h.has("dlg-iam-user"));
+    assert!(h.is_disabled("btn-create-submit"));
+    h.tap("btn-create-submit");
+    gate.open();
+    h.settle(|ui| ui.workspace().sessions.len() == 1);
+    assert!(!h.has("dlg-iam-user"));
+    h.frames(5);
+    assert_eq!(
+        h.leapp.workspace().sessions.len(),
+        1,
+        "one tap, one session"
+    );
 }
 
 // ---- start and stop ----
@@ -358,7 +549,7 @@ fn two_questions() -> (AppHarness, (leapp_core::SessionId, leapp_core::SessionId
     let leapp = h.leapp.clone();
     let second = ids.1;
     h.rt.state.run(async move { leapp.start(second).await });
-    h.settle(|ui| ui.pending_confirm_count() == 2);
+    h.settle(|ui| ui.pending_question_count() == 2);
     (h, ids)
 }
 
@@ -393,7 +584,7 @@ fn a_double_click_does_not_answer_the_next_question() {
     h.tap("btn-overwrite-yes");
     h.tap("btn-overwrite-yes");
 
-    assert_eq!(h.rt.state.pending_confirm_count(), 1);
+    assert_eq!(h.rt.state.pending_question_count(), 1);
     assert_eq!(h.rt.state.pending_confirm(), Some("second"));
     assert!(h.text_of("dlg-overwrite").unwrap().contains("second"));
     h.settle(|ui| status(ui, ids.0) == SessionStatus::Active);
@@ -407,7 +598,7 @@ fn a_double_click_does_not_answer_the_next_question() {
     h.wait_for_arming();
     h.tap("btn-overwrite-yes");
     h.settle(|ui| status(ui, ids.1) == SessionStatus::Active);
-    assert_eq!(h.rt.state.pending_confirm_count(), 0);
+    assert_eq!(h.rt.state.pending_question_count(), 0);
     assert!(!credentials(&h).contains("AKIATWO"));
 }
 

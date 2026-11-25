@@ -21,6 +21,10 @@ Run all commands in `leapp-rs/`.
 - Tests never touch the real home folder, the real keychain, or real AWS.
   Use a `tempfile::TempDir` as home, `MemoryStore`, and `fake-aws`.
 - Keep secrets in the `SecretStore` only. Never put them in `workspace.json` or logs.
+- Secrets are secret access keys, session tokens, MFA codes and the user's backed-up section. They
+  never go in `workspace.json`, logs, `Debug` output, error text or the element tree. The access key
+  ID is an identifier (owner ruling): it may show in the UI and the element tree, but it is kept
+  only in the `SecretStore` and never goes in `workspace.json`, logs, `Debug` output or error text.
 - `leapp-core` must not depend on Rune.
 
 ## Rune
@@ -39,12 +43,28 @@ Run all commands in `leapp-rs/`.
 - The region field is a rune-kit `Combobox` keyed `sel-region`: its trigger is
   `sel-region-value-trigger`, its options are `sel-region-option-<region>`, and typed text goes to
   its search field once it is open. Tests find a region by typing it, not by its list position.
-- The overwrite question ignores answers for `CONFIRM_ARM_SECONDS` (0.5 s of harness time) after it
-  comes to the front. UI tests call `h.wait_for_arming()` before they tap `btn-overwrite-yes` or `-no`.
+- Every question (overwrite and MFA) ignores answers for `CONFIRM_ARM_SECONDS` (0.5 s of harness
+  time) after it comes to the front, and its buttons are disabled until then. UI tests call
+  `h.wait_for_arming()` before they tap `btn-overwrite-*` or `btn-mfa-*`.
+- A rune-kit `Dialog` focuses its first Tab stop (the close button), and `TextInput` has no
+  `autofocus`. To focus a field when a dialog opens, set `TextEdit::focused = true` in the model
+  (the field needs `on_edit`).
+- `ElementInfo` has no disabled flag. Read it from `rt.accessibility_json()`: the node keyed `k`
+  has `"disabled"` in its `states` (`AppHarness::is_disabled`).
+- A tap on a disabled button takes focus from a text field: tap the field again before you type.
 - `Runtime::wake_deadline()` gives only the earliest wake of all sources (Rune has its own wakes), so
   a test cannot read one `wake_after` of `poll` from it.
 - A `Select` list scrolls and its options can lie outside the window; tests pick the first options.
 - `ScrollSpec` has no `Default`: write `ScrollSpec { stick_bottom: false }`.
+- F1 keys: `row-menu-<id>` (the `⋯` button of a row), `menu-<id>` (the `Menu` key of its menu: the
+  frame element is `menu-<id>-menu`, the items are `menu-<id>-item<i>`), `dlg-mfa`,
+  `fld-mfa-code`, `btn-mfa-submit`, `btn-mfa-cancel`, `dlg-delete`, `btn-delete-yes`,
+  `btn-delete-no`, `btn-secret-eye`, `fld-mfa-device`, `err-mfa-device`, `btn-empty-add-session`.
+- Menu item keys hold an index, not a name. Tests pick an item by its label:
+  `AppHarness::tap_menu_item(id, "Delete session")`.
+- rune-kit `Menu::new(k)` keys its frame `<k>-menu` and its items `<k>-item<i>`. A chosen item does not close the menu: each `on_select` clears the app's open-menu state. `row-` also matches the `row-menu-<id>` buttons: tests list rows with `AppHarness::row_keys`.
+- A revealed secure field (`TextInput::revealed(true)`) stays secure: `has_secure_focus()` is still true and the
+  element tree has no text for it. A field's placeholder is only in `rt.accessibility_json()` (`AppHarness::placeholder_of`).
 
 ## Gotchas
 
@@ -53,6 +73,12 @@ Run all commands in `leapp-rs/`.
   `main.rs` keeps the `TempDir` alive for the whole run.
 - Rune runs `App::on_close` for the close button, Cmd+Q and the Dock quit, so `leapp_app::on_close`
   calls `Leapp::shutdown` for all of them (`block_on` on the UI thread). `on_quit` is not used.
+- Core has no timer. `main.rs` starts `leapp_app::spawn_refresh_loop` with `REFRESH_TICK` (10 s)
+  after `startup`. Each tick runs in its own task (a panic ends only that tick). `on_close` aborts
+  the loop. Two errors of one session in one tick go in one toast message, joined with `; `.
+- The harness `Leapp` uses a `ManualClock` (`h.clock.advance(..)`, in `tests/common`; core's own
+  test clock is not exported). `fake-aws` sets token expiry from the real time, so advance 36001 s
+  to expire a token. `h.spawn_refresh_loop()` runs the loop with a 10 ms tick.
 - If the keychain asks for a password at every build, the debug binary has a new signature each time.
   Sign it with an Apple Development certificate:
   `codesign -s "Apple Development: <name>" target/debug/leapp-app` (run it after each build).

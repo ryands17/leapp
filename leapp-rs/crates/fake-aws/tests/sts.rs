@@ -47,3 +47,18 @@ async fn fail_next_returns_an_aws_error_once() {
     assert!(text.contains("InvalidClientTokenId"), "{text}");
     assert!(sts.get_session_token().send().await.is_ok());
 }
+
+#[tokio::test]
+async fn get_caller_identity_returns_the_account() {
+    let fake = FakeAws::start().await;
+    let sts = client(&fake, "AKIDANY");
+    let out = sts.get_caller_identity().send().await.unwrap();
+    assert_eq!(out.account(), Some("123456789012"));
+    assert_eq!(out.arn(), Some("arn:aws:iam::123456789012:user/fake"));
+    assert_eq!(fake.count("GetCallerIdentity"), 1);
+
+    fake.set_account("210987654321");
+    let out = sts.get_caller_identity().send().await.unwrap();
+    assert_eq!(out.account(), Some("210987654321"));
+    assert_eq!(fake.account(), "210987654321");
+}

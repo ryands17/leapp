@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -57,8 +57,8 @@ pub struct Session {
     pub region: String,
     pub profile_id: Uuid,
     pub status: SessionStatus,
-    pub start_time: Option<DateTime<Utc>>,
-    pub session_token_expiration: Option<DateTime<Utc>>,
+    pub start_time: Option<Timestamp>,
+    pub session_token_expiration: Option<Timestamp>,
     pub kind: SessionKind,
 }
 
@@ -98,6 +98,8 @@ pub struct NewIamUser {
     pub secret_access_key: String,
     pub profile_name: String,
     pub region: String,
+    /// Serial number or ARN of the MFA device. Empty after trim means no MFA.
+    pub mfa_device: Option<String>,
 }
 
 impl std::fmt::Debug for NewIamUser {
@@ -108,6 +110,34 @@ impl std::fmt::Debug for NewIamUser {
             .field("secret_access_key", &"<redacted>")
             .field("profile_name", &self.profile_name)
             .field("region", &self.region)
+            .field("mfa_device", &self.mfa_device)
+            .finish()
+    }
+}
+
+/// New values for an IAM User session. A key field that is `None` or empty after trim keeps the
+/// old key.
+#[derive(Clone)]
+pub struct IamUserUpdate {
+    pub name: String,
+    pub profile_name: String,
+    pub region: String,
+    /// Serial number or ARN of the MFA device. Empty after trim means no MFA.
+    pub mfa_device: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+}
+
+impl std::fmt::Debug for IamUserUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("IamUserUpdate")
+            .field("name", &self.name)
+            .field("profile_name", &self.profile_name)
+            .field("region", &self.region)
+            .field("mfa_device", &self.mfa_device)
+            .field("access_key_id", &redacted(&self.access_key_id))
+            .field("secret_access_key", &redacted(&self.secret_access_key))
             .finish()
     }
 }

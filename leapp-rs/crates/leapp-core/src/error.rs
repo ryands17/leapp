@@ -1,14 +1,37 @@
+use std::fmt;
+
 use uuid::Uuid;
+
+/// The input field that an `Error::InvalidInput` is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Name,
+    AccessKeyId,
+    SecretAccessKey,
+    Profile,
+    Region,
+    MfaDevice,
+}
+
+impl fmt::Display for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Field::Name => "name",
+            Field::AccessKeyId => "access_key_id",
+            Field::SecretAccessKey => "secret_access_key",
+            Field::Profile => "profile",
+            Field::Region => "region",
+            Field::MfaDevice => "mfa_device",
+        })
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("session {0} not found")]
     NotFound(Uuid),
     #[error("invalid {field}: {message}")]
-    InvalidInput {
-        field: &'static str,
-        message: String,
-    },
+    InvalidInput { field: Field, message: String },
     #[error("{0}")]
     Aws(String),
     #[error("overwrite of profile \"{0}\" was declined")]
@@ -23,6 +46,14 @@ pub enum Error {
          ~/.aws/credentials or delete the keychain item, then try again."
     )]
     BackupConflict(String),
+    #[error(
+        "the saved copy of profile \"{0}\" is missing from the keychain item \
+         \"aws-profile-backup-{0}\" (service leapp-rs). Leapp RS removed its own keys from the \
+         profile, but could not put your keys back."
+    )]
+    BackupMissing(String),
+    #[error("Missing Multi Factor Authentication code")]
+    MfaCancelled,
     #[error("Leapp RS is closing, so the session did not start")]
     Closing,
     #[error("workspace file version {0} is newer than this app supports")]

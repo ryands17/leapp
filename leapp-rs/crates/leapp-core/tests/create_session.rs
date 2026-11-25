@@ -1,7 +1,7 @@
 mod common;
 
 use common::Harness;
-use leapp_core::{Config, Error, Leapp, SessionKind, SessionStatus};
+use leapp_core::{Config, Error, Field, Leapp, SessionKind, SessionStatus};
 
 #[tokio::test]
 async fn created_session_is_saved_and_survives_reopen() {
@@ -89,7 +89,7 @@ async fn rejects_bad_profile_names() {
             matches!(
                 err,
                 Error::InvalidInput {
-                    field: "profile",
+                    field: Field::Profile,
                     ..
                 }
             ),
@@ -109,16 +109,16 @@ async fn rejects_missing_fields_and_unknown_region() {
 
     let mut r = h.iam_user("dev", "default");
     r.name = "  ".into();
-    assert_eq!(field(r), "name");
+    assert_eq!(field(r), Field::Name);
     let mut r = h.iam_user("dev", "default");
     r.access_key_id = String::new();
-    assert_eq!(field(r), "access_key_id");
+    assert_eq!(field(r), Field::AccessKeyId);
     let mut r = h.iam_user("dev", "default");
     r.secret_access_key = String::new();
-    assert_eq!(field(r), "secret_access_key");
+    assert_eq!(field(r), Field::SecretAccessKey);
     let mut r = h.iam_user("dev", "default");
     r.region = "mars-1".into();
-    assert_eq!(field(r), "region");
+    assert_eq!(field(r), Field::Region);
     assert!(h.secrets.snapshot().is_empty());
 }
 
