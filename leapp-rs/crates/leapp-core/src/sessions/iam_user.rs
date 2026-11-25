@@ -196,6 +196,34 @@ impl Leapp {
             state.ws = next;
         }
     }
+
+    /// Saves the expiration of a new token of `parent` that a chained start got (F23-R7), so
+    /// that the cached token in the keychain is reused. It saves only if the parent's keys did
+    /// not change since the caller took `key_generation` (before it read the keys): a token of
+    /// the old keys must not be reused with the new ones (F1-R4). Any failure is dropped: the
+    /// next start gets a new token (F1-R5). The status and profile of the parent do not change.
+    pub(crate) fn save_parent_token(
+        &self,
+        parent: SessionId,
+        expiration: Timestamp,
+        key_generation: u64,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        if state.closing || super::key_generation(&state, parent) != key_generation {
+            return;
+        }
+        let mut next = state.ws.clone();
+        let Some(session) = next.sessions.iter_mut().find(|s| s.id == parent) else {
+            return;
+        };
+        if !matches!(session.kind, SessionKind::IamUser { .. }) {
+            return;
+        }
+        session.session_token_expiration = Some(expiration);
+        if crate::store::save(&self.workspace_path, &next).is_ok() {
+            state.ws = next;
+        }
+    }
 }
 
 fn body(token: CachedToken, region: String) -> SectionBody {

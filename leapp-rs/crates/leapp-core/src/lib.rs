@@ -44,9 +44,11 @@ struct State {
     /// (outside the lock). A start on such a profile returns `Error::ProfilePending`, so that it
     /// cannot write a new backup that this delete then removes.
     releasing: HashSet<String>,
-    /// Bumped by each edit that changes the keys of a session (missing = 0). A start notes it
-    /// when it sets `Pending`; its account fetch saves only if it is unchanged, so an account
-    /// fetched with the old keys never lands after the edit cleared it (F1-R4, F1-R5).
+    /// Bumped by each edit that changes the keys or the MFA device of a session (missing = 0).
+    /// A start notes it when it sets `Pending`; its account fetch saves only if it is unchanged,
+    /// so an account fetched with the old keys never lands after the edit cleared it (F1-R4,
+    /// F1-R5). A chained start notes it for the parent before it reads the parent's keys, and
+    /// saves a new parent token's expiration only if it is unchanged (F23-R7).
     key_generation: HashMap<SessionId, u64>,
     /// Sessions that an edit changes now. The edit writes the keys outside the lock before it
     /// saves; a start of such a session returns `Error::ProfilePending`, so that it cannot read

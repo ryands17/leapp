@@ -9,6 +9,7 @@ pub use chained::{ASSUME_ROLE_DURATION, DEFAULT_ROLE_SESSION_NAME};
 use iam_user::Issued;
 pub use iam_user::TOKEN_REUSE_MARGIN;
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -41,9 +42,8 @@ impl Leapp {
             if pending_on(ws, session.profile_id) {
                 return Err(pending_error());
             }
-            if state.editing.contains(&id) {
-                return Err(editing_error());
-            }
+            // Early, so that a loop or an edit stops no other session.
+            check_chain(&state, id)?;
             let to_stop: Vec<SessionId> = ws
                 .sessions
                 .iter()
@@ -72,9 +72,9 @@ impl Leapp {
             if pending_on(&state.ws, profile_id) {
                 return Err(pending_error());
             }
-            if state.editing.contains(&id) {
-                return Err(editing_error());
-            }
+            // F23-R9: this is the check that counts, in the critical section that sets
+            // `Pending`.
+            check_chain(&state, id)?;
             set_status(&mut state.ws, id, SessionStatus::Pending);
             key_generation(&state, id)
         };
@@ -111,7 +111,10 @@ impl Leapp {
             let Ok(profile) = profile_name(&state.ws, session.profile_id) else {
                 return Refresh::Skipped;
             };
-            if state.editing.contains(&id)
+            // F23-R9: an edit of the session or of a session above it. A loop or a missing
+            // parent is not skipped: the refresh fails with that error and stops the session.
+            let held_by_edit = matches!(check_chain(&state, id), Err(Error::ProfilePending(_)));
+            if held_by_edit
                 || state.releasing.contains(&profile)
                 || pending_on(&state.ws, session.profile_id)
             {
@@ -727,6 +730,41 @@ pub(crate) fn pending_error() -> Error {
 
 fn editing_error() -> Error {
     Error::ProfilePending("The session is being changed. Try again.".into())
+}
+
+fn parent_editing_error() -> Error {
+    Error::ProfilePending("A session above this session is being changed. Try again.".into())
+}
+
+/// Walks from `id` up its chain of parents. Returns `Error::ProfilePending` if an edit holds the
+/// session or any session above it (F23-R9), `Error::ChainLoop` with the name of `id` if the
+/// parents make a loop (F23-R15), and `Error::InvalidInput` if a parent is missing.
+fn check_chain(state: &State, id: SessionId) -> Result<()> {
+    let ws = &state.ws;
+    let started = ws.session(id).ok_or(Error::NotFound(id))?;
+    let mut seen = HashSet::new();
+    let mut current = started;
+    loop {
+        if !seen.insert(current.id) {
+            return Err(Error::ChainLoop(started.name.clone()));
+        }
+        if state.editing.contains(&current.id) {
+            return Err(if current.id == id {
+                editing_error()
+            } else {
+                parent_editing_error()
+            });
+        }
+        let SessionKind::IamRoleChained {
+            parent_session_id, ..
+        } = &current.kind
+        else {
+            return Ok(());
+        };
+        current = ws
+            .session(*parent_session_id)
+            .ok_or_else(|| chained::missing_parent(current))?;
+    }
 }
 
 fn releasing_error(profile: &str) -> Error {

@@ -189,7 +189,9 @@ impl Leapp {
                     }
                     store::save(&self.workspace_path, &next).map(|()| {
                         state.ws = next;
-                        if keys_changed {
+                        // A token of the old keys or the old MFA device that a chained start
+                        // still gets for this session must not get an expiration (F23-R7).
+                        if keys_changed || mfa_changed {
                             *state.key_generation.entry(id).or_default() += 1;
                         }
                     })

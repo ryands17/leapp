@@ -89,7 +89,18 @@ impl Leapp {
         seen: &mut Vec<SessionId>,
     ) -> Result<Issued> {
         if seen.contains(&session.id) {
-            return Err(Error::ChainLoop(session.name.clone()));
+            // `start` and `refresh_session` find a loop before they call this; this check makes
+            // sure that a loop never recurses without end. The error names the session that
+            // was started (F23-R15).
+            let started = seen.first().copied().unwrap_or(session.id);
+            let name = self
+                .state
+                .lock()
+                .unwrap()
+                .ws
+                .session(started)
+                .map_or_else(|| session.name.clone(), |s| s.name.clone());
+            return Err(Error::ChainLoop(name));
         }
         seen.push(session.id);
         let SessionKind::IamRoleChained {
@@ -102,18 +113,25 @@ impl Leapp {
             return self.iam_user_credentials(session).await;
         };
 
-        let parent = self
-            .state
-            .lock()
-            .unwrap()
-            .ws
-            .session(*parent_session_id)
-            .cloned()
-            .ok_or(Error::NotFound(*parent_session_id))?;
+        // The key generation is taken with the parent, before its keys are read (F23-R7).
+        let (parent, parent_key_generation) = {
+            let state = self.state.lock().unwrap();
+            let parent = state
+                .ws
+                .session(*parent_session_id)
+                .cloned()
+                .ok_or_else(|| missing_parent(session))?;
+            let generation = super::key_generation(&state, parent.id);
+            (parent, generation)
+        };
         // No lock is held here: the parent may ask for an MFA code.
-        let parent_keys = Box::pin(self.session_credentials(&parent, seen))
-            .await?
-            .body;
+        let parent_issued = Box::pin(self.session_credentials(&parent, seen)).await?;
+        // A new parent token is saved on the parent, so that the next chained start and the
+        // parent's own start reuse it (F23-R7). A chained parent has no token cache (F23-R8).
+        if parent_issued.fresh {
+            self.save_parent_token(parent.id, parent_issued.expiration, parent_key_generation);
+        }
+        let parent_keys = parent_issued.body;
 
         let region = session_region(session);
         let client = self.sts_client(
@@ -151,6 +169,15 @@ impl Leapp {
             expiration: expiration_of(credentials.expiration())?,
             fresh: false,
         })
+    }
+}
+
+/// The error of a chained session whose parent is not in the workspace (only a hand edit of
+/// `workspace.json` can do that).
+pub(super) fn missing_parent(session: &Session) -> Error {
+    Error::InvalidInput {
+        field: Field::ParentSession,
+        message: format!("the parent session of \"{}\" is missing", session.name),
     }
 }
 
