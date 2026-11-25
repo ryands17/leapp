@@ -5,7 +5,8 @@ use std::sync::Arc;
 use common::{FlakyStore, Gate, Harness, block_on};
 use jiff::{SignedDuration, Timestamp};
 use leapp_core::{
-    Error, Field, IamUserUpdate, NewIamRoleChained, SessionId, SessionKind, SessionStatus,
+    Error, Field, IamRoleChainedUpdate, IamUserUpdate, NewIamRoleChained, SessionId, SessionKind,
+    SessionStatus,
 };
 
 /// A change to a valid request.
@@ -298,9 +299,9 @@ async fn the_account_comes_from_the_role_arn() {
 }
 
 #[tokio::test]
-async fn update_iam_user_refuses_a_chained_session() {
+async fn the_wrong_update_function_is_refused() {
     let h = Harness::new().await;
-    let (_, c) = parent_and_child(&h, |_| {});
+    let (p, c) = parent_and_child(&h, |_| {});
     let before = h.workspace_text();
 
     let err = h
@@ -318,9 +319,16 @@ async fn update_iam_user_refuses_a_chained_session() {
         )
         .await
         .unwrap_err();
-
     assert!(
         matches!(err, Error::WrongSessionType(id) if id == c),
+        "{err:?}"
+    );
+
+    let mut req = same_as_now(&h, c);
+    req.name = "renamed".into();
+    let err = h.leapp.update_iam_role_chained(p, req).await.unwrap_err();
+    assert!(
+        matches!(err, Error::WrongSessionType(id) if id == p),
         "{err:?}"
     );
     assert_eq!(h.workspace_text(), before);
@@ -727,4 +735,422 @@ async fn a_missing_parent_in_the_file_fails_the_start() {
     }
     assert!(h.fake.requests().is_empty());
     assert_eq!(status(&h, c), SessionStatus::Inactive);
+}
+
+// ---- Edit of chained sessions (F23-R14) and the delete cascade (F23-R6) ----
+
+const OTHER_ROLE: &str = "arn:aws:iam::210987654321:role/other";
+
+/// An update that keeps every value of the chained session `id` as it is now.
+fn same_as_now(h: &Harness, id: SessionId) -> IamRoleChainedUpdate {
+    let ws = h.leapp.workspace();
+    let s = ws.session(id).unwrap();
+    let SessionKind::IamRoleChained {
+        role_arn,
+        parent_session_id,
+        role_session_name,
+        external_id,
+    } = &s.kind
+    else {
+        panic!("not a chained session");
+    };
+    IamRoleChainedUpdate {
+        name: s.name.clone(),
+        parent_session_id: *parent_session_id,
+        role_arn: role_arn.clone(),
+        role_session_name: role_session_name.clone(),
+        external_id: external_id.clone(),
+        profile_name: ws.profile_name(s.profile_id).unwrap().to_string(),
+        region: s.region.clone(),
+    }
+}
+
+/// The keychain keys of the IAM User session `id`.
+fn keys_of(h: &Harness, id: SessionId) -> Vec<String> {
+    let prefix = format!("iam-user-{id}-");
+    h.secrets
+        .snapshot()
+        .into_keys()
+        .filter(|k| k.starts_with(&prefix))
+        .collect()
+}
+
+/// Waits until `done` is true. Panics after 5 s.
+async fn settle(mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the condition did not come true"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn edit_of_a_chained_session_saves_its_fields() {
+    let h = Harness::new().await;
+    let (_, c) = parent_and_child(&h, |_| {});
+    let p2 = h.leapp.create_iam_user(h.iam_user("P2", "other")).unwrap();
+
+    h.leapp
+        .update_iam_role_chained(
+            c,
+            IamRoleChainedUpdate {
+                name: " C renamed ".into(),
+                parent_session_id: p2,
+                role_arn: format!(" {OTHER_ROLE} "),
+                role_session_name: Some(" me ".into()),
+                external_id: Some("ext-2".into()),
+                profile_name: "ops".into(),
+                region: "eu-central-1".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Saved in the file: a new `Leapp` reads the new values.
+    let h = h.reopen();
+    let ws = h.leapp.workspace();
+    let s = ws.session(c).unwrap();
+    assert_eq!(s.name, "C renamed");
+    assert_eq!(s.region, "eu-central-1");
+    assert_eq!(ws.profile_name(s.profile_id), Some("ops"));
+    assert_eq!(s.status, SessionStatus::Inactive);
+    assert_eq!(
+        s.kind,
+        SessionKind::IamRoleChained {
+            role_arn: OTHER_ROLE.into(),
+            parent_session_id: p2,
+            role_session_name: Some("me".into()),
+            external_id: Some("ext-2".into()),
+        }
+    );
+    assert!(h.fake.requests().is_empty());
+}
+
+#[tokio::test]
+async fn edit_of_an_active_chained_session_restarts_it() {
+    let h = Harness::new().await;
+    let (_, c) = parent_and_child(&h, |_| {});
+    h.leapp.start(c).await.unwrap();
+
+    let mut req = same_as_now(&h, c);
+    req.role_arn = OTHER_ROLE.into();
+    h.leapp.update_iam_role_chained(c, req).await.unwrap();
+
+    let calls = assume_role_calls(&h);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(param(&calls[1], "RoleArn"), Some(OTHER_ROLE));
+    assert_eq!(status(&h, c), SessionStatus::Active);
+
+    // A name-only edit does not restart.
+    let mut req = same_as_now(&h, c);
+    req.name = "C renamed".into();
+    h.leapp.update_iam_role_chained(c, req).await.unwrap();
+
+    assert_eq!(h.fake.count("AssumeRole"), 2);
+    assert_eq!(status(&h, c), SessionStatus::Active);
+    assert_eq!(h.leapp.workspace().session(c).unwrap().name, "C renamed");
+}
+
+#[tokio::test]
+async fn a_change_of_parent_restarts_with_the_new_parent() {
+    let h = Harness::new().await;
+    let (_, c) = parent_and_child(&h, |_| {});
+    let p2 = h.leapp.create_iam_user(h.iam_user("P2", "other")).unwrap();
+    h.leapp.start(c).await.unwrap();
+
+    let mut req = same_as_now(&h, c);
+    req.parent_session_id = p2;
+    h.leapp.update_iam_role_chained(c, req).await.unwrap();
+
+    assert_eq!(
+        token_call_keys(&h),
+        [Some("AKID-P".to_string()), Some("AKID-P2".to_string())]
+    );
+    assert_eq!(h.fake.count("AssumeRole"), 2);
+    assert_eq!(status(&h, c), SessionStatus::Active);
+}
+
+#[tokio::test]
+async fn a_loop_is_rejected_on_edit() {
+    let h = Harness::new().await;
+    let p = h.leapp.create_iam_user(h.iam_user("P", "default")).unwrap();
+    let c1 = h
+        .leapp
+        .create_iam_role_chained(chained("C1", p, "ci"))
+        .unwrap();
+    let c2 = h
+        .leapp
+        .create_iam_role_chained(chained("C2", c1, "ops"))
+        .unwrap();
+    let c3 = h
+        .leapp
+        .create_iam_role_chained(chained("C3", c2, "qa"))
+        .unwrap();
+    let before = h.workspace_text();
+
+    for (parent, expected) in [
+        (c2, "would make a loop of chained sessions"),
+        (c3, "would make a loop of chained sessions"),
+        (c1, "must not be the session itself"),
+    ] {
+        let mut req = same_as_now(&h, c1);
+        req.parent_session_id = parent;
+        match h.leapp.update_iam_role_chained(c1, req).await {
+            Err(Error::InvalidInput {
+                field: Field::ParentSession,
+                message,
+            }) => assert_eq!(message, expected),
+            other => panic!("unexpected result {other:?}"),
+        }
+        assert_eq!(h.workspace_text(), before);
+    }
+}
+
+#[tokio::test]
+async fn chained_edit_input_is_checked() {
+    let h = Harness::new().await;
+    let (_, c) = parent_and_child(&h, |_| {});
+    let before = h.workspace_text();
+    type UpdateChange = dyn Fn(&mut IamRoleChainedUpdate);
+    let cases: Vec<(Field, Box<UpdateChange>)> = vec![
+        (Field::Name, Box::new(|r| r.name = "  ".into())),
+        (
+            Field::ParentSession,
+            Box::new(|r| r.parent_session_id = SessionId::new_v4()),
+        ),
+        (Field::RoleArn, Box::new(|r| r.role_arn = "deploy".into())),
+        (
+            Field::RoleSessionName,
+            Box::new(|r| r.role_session_name = Some("x".into())),
+        ),
+        (
+            Field::ExternalId,
+            Box::new(|r| r.external_id = Some("a b".into())),
+        ),
+        (Field::Profile, Box::new(|r| r.profile_name = "[x]".into())),
+        (Field::Region, Box::new(|r| r.region = "mars-1".into())),
+    ];
+    for (field, change) in cases {
+        let mut req = same_as_now(&h, c);
+        change(&mut req);
+        match h.leapp.update_iam_role_chained(c, req).await {
+            Err(Error::InvalidInput { field: f, .. }) => assert_eq!(f, field),
+            other => panic!("{field}: unexpected result {other:?}"),
+        }
+        assert_eq!(h.workspace_text(), before, "{field}");
+    }
+}
+
+#[tokio::test]
+async fn edit_of_a_pending_chained_session_is_refused() {
+    let h = Harness::new().await;
+    let (_, c) = parent_and_child(&h, |_| {});
+    h.fake
+        .delay_next("AssumeRole", std::time::Duration::from_millis(300));
+
+    let (started, edited) = tokio::join!(h.leapp.start(c), async {
+        settle(|| status(&h, c) == SessionStatus::Pending).await;
+        let mut req = same_as_now(&h, c);
+        req.role_arn = OTHER_ROLE.into();
+        h.leapp.update_iam_role_chained(c, req).await
+    });
+
+    started.unwrap();
+    assert!(
+        matches!(edited, Err(Error::ProfilePending(_))),
+        "{edited:?}"
+    );
+    assert_eq!(param(&assume_role_calls(&h)[0], "RoleArn"), Some(DEPLOY));
+    assert_eq!(assume_role_calls(&h).len(), 1);
+}
+
+#[tokio::test]
+async fn delete_of_a_parent_deletes_its_chain() {
+    let h = Harness::new().await;
+    let mine = "[ops]\naws_access_key_id = MINE\n";
+    h.write_credentials(mine);
+    h.prompter.answer(true);
+    let (p, c1) = parent_and_child(&h, |_| {});
+    let c2 = h
+        .leapp
+        .create_iam_role_chained(chained("C2", c1, "ops"))
+        .unwrap();
+    let outside = h.leapp.create_iam_user(h.iam_user("O", "other")).unwrap();
+    h.leapp.start(c2).await.unwrap();
+    h.leapp.start(p).await.unwrap();
+    assert_eq!(keys_of(&h, p).len(), 3);
+
+    h.leapp.delete_session(p).await.unwrap();
+
+    let ws = h.leapp.workspace();
+    for id in [p, c1, c2] {
+        assert!(ws.session(id).is_none());
+        assert!(!h.workspace_text().contains(&id.to_string()));
+    }
+    assert!(ws.session(outside).is_some());
+    assert!(ws.managed_profiles.is_empty());
+    assert!(keys_of(&h, p).is_empty(), "{:?}", keys_of(&h, p));
+    // No section of the chain is left: the user's own section of `ops` is back.
+    assert_eq!(h.credentials_text().as_deref(), Some(mine));
+    assert!(!h.secrets.snapshot().contains_key("aws-profile-backup-ops"));
+}
+
+#[tokio::test]
+async fn delete_of_a_parent_with_a_pending_child_changes_nothing() {
+    // The `Pending` session is the child, then the grandchild.
+    for pending_depth in [1, 2] {
+        let h = Harness::new().await;
+        let (p, c1) = parent_and_child(&h, |_| {});
+        let c2 = h
+            .leapp
+            .create_iam_role_chained(chained("C2", c1, "ops"))
+            .unwrap();
+        let pending = if pending_depth == 1 { c1 } else { c2 };
+        h.fake
+            .delay_next("AssumeRole", std::time::Duration::from_millis(300));
+
+        let (started, deleted) = tokio::join!(h.leapp.start(pending), async {
+            settle(|| status(&h, pending) == SessionStatus::Pending).await;
+            h.leapp.delete_session(p).await
+        });
+
+        started.unwrap();
+        assert!(
+            matches!(deleted, Err(Error::ProfilePending(_))),
+            "{pending_depth}: {deleted:?}"
+        );
+        let ws = h.leapp.workspace();
+        for id in [p, c1, c2] {
+            assert!(ws.session(id).is_some(), "{pending_depth}");
+        }
+        assert_eq!(keys_of(&h, p).len(), 3, "{pending_depth}");
+        assert_eq!(status(&h, pending), SessionStatus::Active);
+    }
+}
+
+/// An edit of a child holds it (its restart waits at the delete of the user's backup). A delete
+/// of the parent must not delete the child under the edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_of_a_parent_while_an_edit_holds_a_child_changes_nothing() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    h.write_credentials("[ci]\naws_access_key_id = MINE\n");
+    h.prompter.answer(true);
+    let (p, c) = parent_and_child(&h, |_| {});
+    h.leapp.start(c).await.unwrap();
+
+    let gate = store.block_delete("aws-profile-backup-ci");
+    let mut req = same_as_now(&h, c);
+    req.region = "eu-central-1".into();
+    let leapp = &h.leapp;
+    let (deleted, edited) = std::thread::scope(|scope| {
+        let editor = scope.spawn(|| block_on(leapp.update_iam_role_chained(c, req)));
+        gate.wait_blocked();
+        let deleted = within_time(scope, &gate, || block_on(leapp.delete_session(p)));
+        gate.open();
+        (deleted, editor.join().unwrap())
+    });
+
+    assert!(
+        matches!(deleted, Err(Error::ProfilePending(_))),
+        "{deleted:?}"
+    );
+    edited.unwrap();
+    let ws = h.leapp.workspace();
+    assert!(ws.session(p).is_some());
+    assert_eq!(ws.session(c).unwrap().region, "eu-central-1");
+    assert_eq!(status(&h, c), SessionStatus::Active);
+    assert_eq!(keys_of(&h, p).len(), 3);
+}
+
+#[tokio::test]
+async fn descendants_lists_each_session_once() {
+    let h = Harness::new().await;
+    let p = h.leapp.create_iam_user(h.iam_user("P", "default")).unwrap();
+    let a = h
+        .leapp
+        .create_iam_role_chained(chained("A", p, "ci"))
+        .unwrap();
+    let b = h
+        .leapp
+        .create_iam_role_chained(chained("B", p, "ops"))
+        .unwrap();
+    let g = h
+        .leapp
+        .create_iam_role_chained(chained("G", a, "qa"))
+        .unwrap();
+    h.leapp.create_iam_user(h.iam_user("O", "other")).unwrap();
+
+    let ws = h.leapp.workspace();
+    assert_eq!(ws.descendants(p), [a, b, g]);
+    assert_eq!(ws.descendants(a), [g]);
+    assert!(ws.descendants(g).is_empty());
+}
+
+/// A loop in `workspace.json` (a hand edit): `descendants` ends, and a delete removes the loop.
+#[tokio::test]
+async fn a_loop_in_the_file_ends_descendants_and_delete() {
+    let h = Harness::new().await;
+    let (p, c1) = parent_and_child(&h, |_| {});
+    let c2 = h
+        .leapp
+        .create_iam_role_chained(chained("C2", c1, "ops"))
+        .unwrap();
+    set_parent_in_file(&h, c1, c2);
+    let h = h.reopen();
+
+    let ws = h.leapp.workspace();
+    assert_eq!(ws.descendants(c1), [c2]);
+    assert_eq!(ws.descendants(c2), [c1]);
+    assert!(ws.descendants(p).is_empty());
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        h.leapp.delete_session(c1),
+    )
+    .await
+    .expect("the delete returns at once")
+    .unwrap();
+    let ws = h.leapp.workspace();
+    assert!(ws.session(c1).is_none());
+    assert!(ws.session(c2).is_none());
+    assert!(ws.session(p).is_some());
+}
+
+/// Whether this process can write to a folder of mode 0o500 (root can).
+#[cfg(unix)]
+fn modes_are_ignored() -> bool {
+    let dir = tempfile::TempDir::new().unwrap();
+    common::set_mode(dir.path(), 0o500);
+    let ignored = std::fs::write(dir.path().join("probe"), "x").is_ok();
+    common::set_mode(dir.path(), 0o700);
+    ignored
+}
+
+/// The stop of an active child fails: the delete returns the error and removes nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_delete_whose_stop_fails_removes_nothing() {
+    if modes_are_ignored() {
+        eprintln!("skipped: this process ignores folder modes");
+        return;
+    }
+    let h = Harness::new().await;
+    let (p, c) = parent_and_child(&h, |_| {});
+    h.leapp.start(c).await.unwrap();
+    let before = h.credentials_text();
+
+    common::set_mode(&h.home.path().join(".aws"), 0o500);
+    let deleted = h.leapp.delete_session(p).await;
+    common::set_mode(&h.home.path().join(".aws"), 0o700);
+
+    assert!(deleted.is_err(), "{deleted:?}");
+    let ws = h.leapp.workspace();
+    assert!(ws.session(p).is_some());
+    assert_eq!(status(&h, c), SessionStatus::Active);
+    assert_eq!(keys_of(&h, p).len(), 3);
+    assert_eq!(h.credentials_text(), before);
 }

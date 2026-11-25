@@ -3,11 +3,14 @@
 
 use uuid::Uuid;
 
+use super::edit::{Editing, changed_meanwhile};
 use super::iam_user::{Issued, aws_message, expiration_of, session_region};
+use super::{pending_error, pending_on, profile_name};
 use crate::aws_files::SectionBody;
 use crate::error::{Error, Field, Result};
 use crate::model::{
-    NewIamRoleChained, Session, SessionId, SessionKind, SessionStatus, role_arn_account,
+    IamRoleChainedUpdate, NewIamRoleChained, Session, SessionId, SessionKind, SessionStatus,
+    Workspace, role_arn_account,
 };
 use crate::{Leapp, check_profile_chars, check_region, profile_id_for, required, store};
 
@@ -26,57 +29,120 @@ impl Leapp {
     /// be in a loop, so no loop check is needed.
     pub fn create_iam_role_chained(&self, req: NewIamRoleChained) -> Result<SessionId> {
         let mut state = self.state.lock().unwrap();
-        let name = required(Field::Name, &req.name)?;
-        if state.ws.session(req.parent_session_id).is_none() {
-            return Err(Error::InvalidInput {
-                field: Field::ParentSession,
-                message: "session not found".into(),
-            });
-        }
-        let role_arn = req.role_arn.trim();
-        if role_arn_account(role_arn).is_none() {
-            return Err(Error::InvalidInput {
-                field: Field::RoleArn,
-                message: "must look like arn:aws:iam::123456789012:role/name".into(),
-            });
-        }
-        let role_session_name = optional(
-            Field::RoleSessionName,
-            req.role_session_name.as_deref(),
-            64,
-            ROLE_SESSION_NAME_EXTRA,
-        )?;
-        let external_id = optional(
-            Field::ExternalId,
-            req.external_id.as_deref(),
-            1224,
-            EXTERNAL_ID_EXTRA,
-        )?;
-        let profile = required(Field::Profile, &req.profile_name)?;
-        check_profile_chars(profile)?;
-        check_region(&req.region)?;
+        let valid = validate(&state.ws, &req, None)?;
 
         let id = Uuid::new_v4();
         let mut next = state.ws.clone();
-        let profile_id = profile_id_for(&mut next, profile);
+        let profile_id = profile_id_for(&mut next, valid.profile);
         next.sessions.push(Session {
             id,
-            name: name.to_string(),
+            name: valid.name.to_string(),
             region: req.region.clone(),
             profile_id,
             status: SessionStatus::Inactive,
             start_time: None,
             session_token_expiration: None,
-            kind: SessionKind::IamRoleChained {
-                role_arn: role_arn.to_string(),
-                parent_session_id: req.parent_session_id,
-                role_session_name,
-                external_id,
-            },
+            kind: valid.kind,
         });
         store::save(&self.workspace_path, &next)?;
         state.ws = next;
         Ok(id)
+    }
+
+    /// Edits an IAM Role Chained session with the validation of `create_iam_role_chained`. The
+    /// new parent must not be the session itself (`"must not be the session itself"`) or a
+    /// session below it (`"would make a loop of chained sessions"`).
+    ///
+    /// F23-R14: if the session is `Active` and anything but the name changes (the parent too),
+    /// the session is stopped, saved and started again. A name-only edit does not restart. An
+    /// edit of a `Pending` session, or of one that another edit or change holds, returns
+    /// `Error::ProfilePending` and changes nothing. `update_iam_user` is the edit of an IAM User
+    /// session: this function returns `Error::WrongSessionType` for one.
+    ///
+    /// The parent is checked again in the critical section that saves, because a delete or an
+    /// edit may change the chain while the session stops. If that check or the save fails after
+    /// the stop, the session stays `Inactive` and the error is returned. If the restart fails,
+    /// the edit stays saved and the session is `Inactive`; the error of the start is returned.
+    /// If the stop finds the user's backup missing, the edit completes and then returns
+    /// `Error::BackupMissing` (F1-R8).
+    ///
+    /// This function does blocking file and keychain I/O. Call it from a task that may block.
+    pub async fn update_iam_role_chained(
+        &self,
+        id: SessionId,
+        req: IamRoleChainedUpdate,
+    ) -> Result<()> {
+        let req = as_new(req);
+        let (was_active, restart, reservation) = {
+            let mut state = self.state.lock().unwrap();
+            let session = state.ws.session(id).ok_or(Error::NotFound(id))?;
+            if !matches!(session.kind, SessionKind::IamRoleChained { .. }) {
+                return Err(Error::WrongSessionType(id));
+            }
+            let valid = validate(&state.ws, &req, Some(id))?;
+            if session.status == SessionStatus::Pending {
+                return Err(pending_error());
+            }
+            let was_active = session.status == SessionStatus::Active;
+            let changed = valid.kind != session.kind
+                || req.region != session.region
+                || valid.profile != profile_name(&state.ws, session.profile_id)?;
+            let restart = was_active && changed;
+            // The restart would fail on a profile that another session starts on now.
+            let new_profile = state.ws.profiles.iter().find(|p| p.name == valid.profile);
+            if restart && new_profile.is_some_and(|p| pending_on(&state.ws, p.id)) {
+                return Err(pending_error());
+            }
+            let reservation = Editing::reserve(&self.state, &mut state, id)?;
+            (was_active, restart, reservation)
+        };
+
+        let mut backup_missing = None;
+        if restart {
+            match self.stop(id).await {
+                Ok(()) => {}
+                Err(Error::BackupMissing(p)) => backup_missing = Some(p),
+                Err(e) => return Err(e),
+            }
+        }
+
+        {
+            let mut state = self.state.lock().unwrap();
+            let expected = if was_active && !restart {
+                SessionStatus::Active
+            } else {
+                SessionStatus::Inactive
+            };
+            match state.ws.session(id) {
+                None => return Err(Error::NotFound(id)),
+                Some(s) if s.status != expected => return Err(changed_meanwhile()),
+                Some(_) => {}
+            }
+            let valid = validate(&state.ws, &req, Some(id))?;
+            let mut next = state.ws.clone();
+            let profile_id = profile_id_for(&mut next, valid.profile);
+            let session = next
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .expect("the session was found above");
+            session.name = valid.name.to_string();
+            session.region = req.region.clone();
+            session.profile_id = profile_id;
+            session.kind = valid.kind;
+            store::save(&self.workspace_path, &next)?;
+            state.ws = next;
+        }
+
+        // The edit is saved; the restart below is a normal start.
+        drop(reservation);
+        if restart {
+            self.start(id).await?;
+        }
+        match backup_missing {
+            Some(p) => Err(Error::BackupMissing(p)),
+            None => Ok(()),
+        }
     }
 
     /// Temporary credentials for any session type. A chained session first gets the credentials
@@ -187,6 +253,96 @@ pub(super) fn missing_parent(session: &Session) -> Error {
     Error::InvalidInput {
         field: Field::ParentSession,
         message: format!("the parent session of \"{}\" is missing", session.name),
+    }
+}
+
+/// The valid values of a chained session form.
+struct Valid<'a> {
+    name: &'a str,
+    profile: &'a str,
+    kind: SessionKind,
+}
+
+/// The validation of `create_iam_role_chained` and `update_iam_role_chained`, in the order of the
+/// form fields. `edited` is the session of an edit: its new parent must not be the session itself
+/// or a session below it.
+fn validate<'a>(
+    ws: &Workspace,
+    req: &'a NewIamRoleChained,
+    edited: Option<SessionId>,
+) -> Result<Valid<'a>> {
+    let name = required(Field::Name, &req.name)?;
+    check_parent(ws, req.parent_session_id, edited)?;
+    let role_arn = req.role_arn.trim();
+    if role_arn_account(role_arn).is_none() {
+        return Err(Error::InvalidInput {
+            field: Field::RoleArn,
+            message: "must look like arn:aws:iam::123456789012:role/name".into(),
+        });
+    }
+    let role_session_name = optional(
+        Field::RoleSessionName,
+        req.role_session_name.as_deref(),
+        64,
+        ROLE_SESSION_NAME_EXTRA,
+    )?;
+    let external_id = optional(
+        Field::ExternalId,
+        req.external_id.as_deref(),
+        1224,
+        EXTERNAL_ID_EXTRA,
+    )?;
+    let profile = required(Field::Profile, &req.profile_name)?;
+    check_profile_chars(profile)?;
+    check_region(&req.region)?;
+    Ok(Valid {
+        name,
+        profile,
+        kind: SessionKind::IamRoleChained {
+            role_arn: role_arn.to_string(),
+            parent_session_id: req.parent_session_id,
+            role_session_name,
+            external_id,
+        },
+    })
+}
+
+/// The parent must exist; for an edit of `edited`, it must also not make a loop.
+fn check_parent(ws: &Workspace, parent: SessionId, edited: Option<SessionId>) -> Result<()> {
+    let message = if ws.session(parent).is_none() {
+        "session not found"
+    } else if edited == Some(parent) {
+        "must not be the session itself"
+    } else if edited.is_some_and(|id| ws.descendants(id).contains(&parent)) {
+        "would make a loop of chained sessions"
+    } else {
+        return Ok(());
+    };
+    Err(Error::InvalidInput {
+        field: Field::ParentSession,
+        message: message.into(),
+    })
+}
+
+/// An edit has the fields of a create request; one validation serves both.
+fn as_new(req: IamRoleChainedUpdate) -> NewIamRoleChained {
+    let IamRoleChainedUpdate {
+        name,
+        parent_session_id,
+        role_arn,
+        role_session_name,
+        external_id,
+        profile_name,
+        region,
+    } = req;
+    NewIamRoleChained {
+        name,
+        parent_session_id,
+        role_arn,
+        role_session_name,
+        external_id,
+        profile_name,
+        region,
     }
 }
 

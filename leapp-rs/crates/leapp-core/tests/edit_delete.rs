@@ -539,11 +539,11 @@ async fn a_delete_while_an_edit_changes_the_keys_is_refused() {
     );
 }
 
-/// The edit reserves the session after the delete checked for a reservation: while the stop of
-/// the delete deletes the user's backup. The delete must see the reservation in the critical
-/// section that removes the session.
+/// A delete reserves the session before its stop (F23-R6), so an edit that comes while the stop
+/// deletes the user's backup is refused, and the delete completes: no key that the edit writes
+/// can stay in the keychain with no session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delete_refuses_an_edit_that_began_during_its_stop() {
+async fn an_edit_during_the_stop_of_a_delete_is_refused() {
     let store = Arc::new(FlakyStore::default());
     let h = Harness::with_store(store.clone()).await;
     h.write_credentials(MINE);
@@ -556,8 +556,6 @@ async fn a_delete_refuses_an_edit_that_began_during_its_stop() {
 
     // The stop of the delete waits at the delete of the backup, after the session is `Inactive`.
     let stop_gate = store.block_delete("aws-profile-backup-default");
-    // The edit waits at its read of the old keys, with the session reserved.
-    let edit_gate = store.block_get(&format!("iam-user-{id}-access-key-id"));
     let mut req = same_as_now(&h, id);
     req.access_key_id = Some("AKID-NEW".into());
     req.secret_access_key = Some("SECRET-NEW".into());
@@ -565,30 +563,23 @@ async fn a_delete_refuses_an_edit_that_began_during_its_stop() {
     let (deleted, edited) = std::thread::scope(|scope| {
         let deleter = scope.spawn(|| block_on(leapp.delete_session(id)));
         stop_gate.wait_blocked();
-        let editor = scope.spawn(|| block_on(leapp.update_iam_user(id, req)));
-        edit_gate.wait_blocked();
-
+        let edited = scope
+            .spawn(|| block_on(leapp.update_iam_user(id, req)))
+            .join()
+            .unwrap();
         stop_gate.open();
-        let deleted = deleter.join().unwrap();
-        edit_gate.open();
-        (deleted, editor.join().unwrap())
+        (deleter.join().unwrap(), edited)
     });
 
     assert!(
-        matches!(deleted, Err(Error::ProfilePending(_))),
-        "{deleted:?}"
+        matches!(edited, Err(Error::ProfilePending(_))),
+        "{edited:?}"
     );
-    edited.unwrap();
+    deleted.unwrap();
     // The stop of the delete completed: the user's section is back.
     assert_eq!(h.credentials_text().as_deref(), Some(MINE));
-    assert!(h.leapp.workspace().session(id).is_some());
-    assert_eq!(
-        h.secrets
-            .snapshot()
-            .get(&format!("iam-user-{id}-access-key-id"))
-            .map(String::as_str),
-        Some("AKID-NEW")
-    );
+    assert!(h.leapp.workspace().session(id).is_none());
+    assert!(keys_of(&h, id).is_empty(), "{:?}", keys_of(&h, id));
 }
 
 /// The second key write of an edit fails: the first new key goes out again, the old keys are

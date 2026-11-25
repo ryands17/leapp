@@ -20,8 +20,8 @@ use uuid::Uuid;
 pub use config::{Clock, Config, Endpoints, Prompter, SystemClock};
 pub use error::{Error, Field, Result};
 pub use model::{
-    IamUserUpdate, ManagedProfile, NamedProfile, NewIamRoleChained, NewIamUser, Session, SessionId,
-    SessionKind, SessionStatus, Settings, Workspace,
+    IamRoleChainedUpdate, IamUserUpdate, ManagedProfile, NamedProfile, NewIamRoleChained,
+    NewIamUser, Session, SessionId, SessionKind, SessionStatus, Settings, Workspace,
 };
 pub use refresh::{REFRESH_TICK, RefreshFailure, RefreshReport, SESSION_DURATION};
 pub use secrets::{KeychainStore, MemoryStore, SecretStore};

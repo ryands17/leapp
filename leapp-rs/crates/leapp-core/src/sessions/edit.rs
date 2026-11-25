@@ -1,8 +1,8 @@
-//! Edit and delete of sessions (F1-R3, F1-R4, F1-R6, spec 10.3 without the cascade, F1-R9).
+//! Edit and delete of sessions (F1-R3, F1-R4, F1-R6, spec 10.3 with the cascade of F23-R6, F1-R9).
 
 use std::sync::Mutex;
 
-use super::{editing_error, pending_error, pending_on, profile_name};
+use super::{editing_error, pending_error, pending_on, profile_name, releasing_error};
 use crate::error::{Error, Field, Result};
 use crate::model::{IamUserUpdate, SessionId, SessionKind, SessionStatus};
 use crate::secrets::SecretStore;
@@ -220,48 +220,108 @@ impl Leapp {
         }
     }
 
-    /// Deletes a session (spec 10.3 without the chained cascade and pins, F1-R9): stops it if it
-    /// is `Active`, saves the workspace without it, then deletes its keychain keys. A failed key
-    /// delete is dropped (F1-R6). A `Pending` session, or one that an edit has reserved, returns
-    /// `Error::ProfilePending` and stays.
-    /// If the stop finds the user's backup missing, the delete completes and then returns
+    /// Deletes a session and every chained session below it, at any depth (spec 10.3, F23-R6,
+    /// without pins), then deletes the keychain keys of the IAM User sessions among them. A
+    /// failed key delete is dropped (F1-R6).
+    ///
+    /// 1. Under the lock: if the session or a session below it is `Pending`, held by an edit or
+    ///    a change, or `Active` on a profile that a stop still releases, returns
+    ///    `Error::ProfilePending` and changes nothing. Else reserves all of them (all or none),
+    ///    so that no start, refresh or edit of them runs until the end.
+    /// 2. Stops each `Active` one, the lowest sessions first and the session `id` last, so that
+    ///    the user's sections that were backed up go back into the credentials file.
+    /// 3. Under the lock: removes all of them in one workspace save. A chained session that came
+    ///    below them meanwhile (a create or an edit) is removed too, unless another edit holds it.
+    /// 4. Deletes the keychain keys, without the lock.
+    ///
+    /// If a stop fails (not a missing backup) or step 3 fails, nothing is removed and the error
+    /// is returned; the sessions that step 2 stopped before the failure stay `Inactive`. If a
+    /// stop finds the user's backup missing, the delete completes and then returns
     /// `Error::BackupMissing` (F1-R8).
     ///
     /// This function does blocking file and keychain I/O. Call it from a task that may block.
     pub async fn delete_session(&self, id: SessionId) -> Result<()> {
-        // An edit that has the session reserved may put keys back under its UUID after the
-        // delete: they would stay in the keychain with no session. The check in the critical
-        // section below is the one that counts; this one only spares the stop.
-        if self.state.lock().unwrap().editing.contains(&id) {
-            return Err(editing_error());
-        }
-        // `stop` returns `NotFound` and `ProfilePending` itself, and does nothing if `Inactive`.
-        let backup_missing = match self.stop(id).await {
-            Ok(()) => None,
-            Err(Error::BackupMissing(p)) => Some(p),
-            Err(e) => return Err(e),
-        };
-        {
+        let (ids, active, reservation) = {
             let mut state = self.state.lock().unwrap();
-            match state.ws.session(id) {
-                None => return Err(Error::NotFound(id)),
-                Some(s) if s.status != SessionStatus::Inactive => return Err(changed_meanwhile()),
-                Some(_) => {}
+            state.ws.session(id).ok_or(Error::NotFound(id))?;
+            let mut ids = vec![id];
+            ids.extend(state.ws.descendants(id));
+            let mut active = Vec::new();
+            for &i in &ids {
+                let s = state
+                    .ws
+                    .session(i)
+                    .expect("`descendants` gives sessions of `ws`");
+                match s.status {
+                    SessionStatus::Pending => return Err(pending_error()),
+                    SessionStatus::Active => {
+                        let profile = profile_name(&state.ws, s.profile_id)?;
+                        if state.releasing.contains(&profile) {
+                            return Err(releasing_error(&profile));
+                        }
+                        active.push(i);
+                    }
+                    SessionStatus::Inactive => {}
+                }
             }
-            if state.editing.contains(&id) {
-                return Err(editing_error());
+            // An edit that holds one of them may put keys back under its UUID after the
+            // delete, or save a session whose parent is gone.
+            let reservation = Editing::reserve_all(&self.state, &mut state, &ids)?;
+            (ids, active, reservation)
+        };
+
+        // `descendants` is breadth-first, so the reverse order stops the lowest sessions first.
+        let mut backup_missing = None;
+        for &i in active.iter().rev() {
+            match self.stop(i).await {
+                Ok(()) => {}
+                Err(Error::BackupMissing(p)) => {
+                    backup_missing.get_or_insert(p);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let users = {
+            let mut state = self.state.lock().unwrap();
+            if state.ws.session(id).is_none() {
+                return Err(Error::NotFound(id));
+            }
+            let mut removed = vec![id];
+            removed.extend(state.ws.descendants(id));
+            let mut users = Vec::new();
+            for &i in &removed {
+                let s = state
+                    .ws
+                    .session(i)
+                    .expect("`descendants` gives sessions of `ws`");
+                if s.status != SessionStatus::Inactive {
+                    return Err(changed_meanwhile());
+                }
+                if !ids.contains(&i) && state.editing.contains(&i) {
+                    return Err(editing_error());
+                }
+                if matches!(s.kind, SessionKind::IamUser { .. }) {
+                    users.push(i);
+                }
             }
             let mut next = state.ws.clone();
-            next.sessions.retain(|s| s.id != id);
+            next.sessions.retain(|s| !removed.contains(&s.id));
             store::save(&self.workspace_path, &next)?;
             state.ws = next;
-            state.key_generation.remove(&id);
-        }
-        let names = KeyNames::of(id);
+            for i in &removed {
+                state.key_generation.remove(i);
+            }
+            users
+        };
         let secrets = self.config.secrets.as_ref();
-        for key in [names.access_key_id, names.secret_access_key, names.token] {
-            let _ = secrets.delete(&key);
+        for user in users {
+            let names = KeyNames::of(user);
+            for key in [names.access_key_id, names.secret_access_key, names.token] {
+                let _ = secrets.delete(&key);
+            }
         }
+        drop(reservation);
         match backup_missing {
             Some(p) => Err(Error::BackupMissing(p)),
             None => Ok(()),
@@ -280,7 +340,11 @@ pub(super) struct Editing<'a> {
 
 impl<'a> Editing<'a> {
     /// Marks `id` as reserved. Returns `Error::ProfilePending` if another edit has it.
-    fn reserve(state: &'a Mutex<State>, locked: &mut State, id: SessionId) -> Result<Editing<'a>> {
+    pub(super) fn reserve(
+        state: &'a Mutex<State>,
+        locked: &mut State,
+        id: SessionId,
+    ) -> Result<Editing<'a>> {
         Self::reserve_all(state, locked, &[id])
     }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,30 @@ impl Workspace {
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// All chained sessions below `id`, at any depth, each one time, without `id`. The order is
+    /// stable: breadth-first from `id`, and in workspace order on each level. A loop of parents
+    /// (only a hand edit of `workspace.json` can make one) does not make it run without end.
+    pub fn descendants(&self, id: SessionId) -> Vec<SessionId> {
+        let mut seen = HashSet::from([id]);
+        let mut found = Vec::new();
+        let mut queue = VecDeque::from([id]);
+        while let Some(parent) = queue.pop_front() {
+            for s in &self.sessions {
+                let SessionKind::IamRoleChained {
+                    parent_session_id, ..
+                } = &s.kind
+                else {
+                    continue;
+                };
+                if *parent_session_id == parent && seen.insert(s.id) {
+                    found.push(s.id);
+                    queue.push_back(s.id);
+                }
+            }
+        }
+        found
     }
 
     pub fn profile_name(&self, profile_id: Uuid) -> Option<&str> {
@@ -221,4 +245,19 @@ impl std::fmt::Debug for IamUserUpdate {
             .field("secret_access_key", &redacted(&self.secret_access_key))
             .finish()
     }
+}
+
+/// New values for an IAM Role Chained session: the fields of `NewIamRoleChained`. It holds no
+/// secrets.
+#[derive(Clone, Debug)]
+pub struct IamRoleChainedUpdate {
+    pub name: String,
+    pub parent_session_id: SessionId,
+    pub role_arn: String,
+    /// Empty after trim means not set: `DEFAULT_ROLE_SESSION_NAME` is sent.
+    pub role_session_name: Option<String>,
+    /// Empty after trim means not set.
+    pub external_id: Option<String>,
+    pub profile_name: String,
+    pub region: String,
 }
