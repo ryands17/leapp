@@ -1380,3 +1380,73 @@ async fn a_parent_token_of_keys_from_a_failed_key_write_is_not_kept() {
         "the token of the rejected keys is in the keychain"
     );
 }
+
+/// A keychain write of a parent token can wait for a macOS prompt. During that wait, the core
+/// state stays free: the UI reads the workspace, and the token is still kept after the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_parent_token_write_does_not_hold_the_workspace() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let (p, c) = parent_and_child(&h, |_| {});
+    let token_gate = store.block_set(&format!("iam-user-{p}-session-token"));
+
+    let leapp = &h.leapp;
+    let (started, read_while_blocked) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| block_on(leapp.start(c)));
+        token_gate.wait_blocked();
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(leapp.workspace());
+        });
+        let read = rx.recv_timeout(std::time::Duration::from_secs(2));
+        // Open the gate in all cases, so that the start ends and the test does not hang.
+        token_gate.open();
+        (starter.join().unwrap(), read.is_ok())
+    });
+
+    assert!(
+        read_while_blocked,
+        "the workspace read waited for the keychain write"
+    );
+    started.unwrap();
+    assert!(expiration(&h, p).is_some(), "the parent token was not kept");
+}
+
+/// F1-R4 with the token lock: a chained start passed its key generation check and waits on the
+/// keychain write of the parent token (a macOS prompt). A key edit of the parent that comes
+/// meanwhile waits for that write, then deletes the token: no token of the old keys stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_edit_during_a_slow_parent_token_write_leaves_no_old_token() {
+    let store = Arc::new(FlakyStore::default());
+    let h = Harness::with_store(store.clone()).await;
+    let (p, c) = parent_and_child(&h, |_| {});
+    let token_gate = store.block_set(&format!("iam-user-{p}-session-token"));
+
+    let leapp = &h.leapp;
+    let (started, edited) = std::thread::scope(|scope| {
+        let starter = scope.spawn(|| block_on(leapp.start(c)));
+        token_gate.wait_blocked();
+        let editor = scope.spawn(|| block_on(leapp.update_iam_user(p, new_keys_for_p(None))));
+        // Give the edit time to reach the token lock (or, without it, to end).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        token_gate.open();
+        (starter.join().unwrap(), editor.join().unwrap())
+    });
+
+    started.unwrap();
+    edited.unwrap();
+    assert_eq!(
+        h.secrets
+            .snapshot()
+            .get(&format!("iam-user-{p}-access-key-id"))
+            .map(String::as_str),
+        Some("AKID-NEW")
+    );
+    assert_eq!(expiration(&h, p), None, "the old token got an expiration");
+    assert!(
+        !h.secrets
+            .snapshot()
+            .contains_key(&format!("iam-user-{p}-session-token")),
+        "a token of the old keys is in the keychain"
+    );
+}

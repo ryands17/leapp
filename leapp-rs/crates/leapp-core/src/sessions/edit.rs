@@ -149,6 +149,10 @@ impl Leapp {
             }
         }
 
+        // The key change is one step for `save_parent_token`, which checks the key generation
+        // and writes a parent token under the same lock. The `state` lock is taken only inside,
+        // and no `.await` runs until the guard is dropped.
+        let token_guard = (keys_changed || mfa_changed).then(|| self.token_lock.lock().unwrap());
         let written = match &key_change {
             // On a failure, `write` puts the old keys back before it returns.
             Some(change) => change.write(secrets, &names),
@@ -217,6 +221,7 @@ impl Leapp {
                 .entry(id)
                 .or_default() += 1;
         }
+        drop(token_guard);
         saved?;
         // The expiration is cleared, so a token that this delete misses is not reused.
         if keys_changed || mfa_changed {

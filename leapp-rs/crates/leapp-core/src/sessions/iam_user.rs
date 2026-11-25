@@ -208,10 +208,13 @@ impl Leapp {
     /// Keeps a new token of `parent` that a chained start got (F23-R7): writes it to the
     /// keychain and saves its expiration, so that the next start reuses it. It does both only if
     /// the parent's keys and MFA device did not change since the caller took `key_generation`
-    /// (before it read the keys), in the same critical section as that check: a token of the old
-    /// keys must never replace or be reused as a token of the new ones (F1-R4). Any failure is
-    /// dropped: the next start gets a new token (F1-R5). The status and profile of the parent do
-    /// not change.
+    /// (before it read the keys): a token of the old keys must never replace or be reused as a
+    /// token of the new ones (F1-R4). Any failure is dropped: the next start gets a new token
+    /// (F1-R5). The status and profile of the parent do not change.
+    ///
+    /// The check and the keychain write are one step under `token_lock`, which an edit of the
+    /// keys also holds for its whole key change. The `state` lock is held only for the short
+    /// checks, never during the keychain write, which can wait for a macOS prompt.
     pub(crate) fn save_parent_token(
         &self,
         parent: SessionId,
@@ -219,17 +222,16 @@ impl Leapp {
         expiration: Timestamp,
         key_generation: u64,
     ) {
-        // The keychain write is under the lock, so that an edit cannot end between the check
-        // and the write. No `.await` follows while the lock is held.
-        let mut state = self.state.lock().unwrap();
-        if state.closing || super::key_generation(&state, parent) != key_generation {
-            return;
-        }
-        if !state
-            .ws
-            .session(parent)
-            .is_some_and(|s| matches!(s.kind, SessionKind::IamUser { .. }))
-        {
+        let _token = self.token_lock.lock().unwrap();
+        let current = |state: &crate::State| {
+            !state.closing
+                && super::key_generation(state, parent) == key_generation
+                && state
+                    .ws
+                    .session(parent)
+                    .is_some_and(|s| matches!(s.kind, SessionKind::IamUser { .. }))
+        };
+        if !current(&self.state.lock().unwrap()) {
             return;
         }
         let cached = CachedToken {
@@ -240,7 +242,14 @@ impl Leapp {
         let Ok(json) = serde_json::to_string(&cached) else {
             return;
         };
+        // No lock but `token_lock` is held here.
         if self.config.secrets.set(&token_key(parent), &json).is_err() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        // The generation cannot change while `token_lock` is held; `closing` and a delete of
+        // the parent can.
+        if !current(&state) {
             return;
         }
         let mut next = state.ws.clone();

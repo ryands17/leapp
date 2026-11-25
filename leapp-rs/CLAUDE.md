@@ -111,12 +111,12 @@ Run all commands in `leapp-rs/`.
 - If the keychain asks for a password at every build, the debug binary has a new signature each time.
   Sign it with an Apple Development certificate:
   `codesign -s "Apple Development: <name>" target/debug/leapp-app` (run it after each build).
-- `save_parent_token` (`sessions/iam_user.rs`) writes the parent token to the keychain under
-  the core state `Mutex` (no `.await` while it holds the lock), so that the key generation check
-  and the write are one step. A keychain prompt then holds the lock, and the UI, which reads the
-  workspace each frame, freezes until the user answers. F4 (SSO tokens) must decide on this
-  (for example a write lock per parent) before it copies the pattern.
-
+- Never write the keychain while the core `state` lock is held: a keychain write can wait for a
+  macOS prompt, and the UI reads the workspace through that lock. If a check of the state and a
+  keychain write must be one step, hold `Leapp::token_lock` (take it before `state`, never while
+  `state` is held) and take `state` only for the short checks. `save_parent_token`
+  (`sessions/iam_user.rs`) and the key change of `update_iam_user` (`sessions/edit.rs`) do this
+  for the key generation check (F1-R4). F4 (SSO tokens) uses the same rule.
 - `aws-sdk-sts` needs the `rt-tokio` feature. Without it, the client panics at build time.
 - The pinned `aws-sdk-sts` uses the Query protocol (form body, `Action=...`).
   `fake-aws` answers in that protocol.

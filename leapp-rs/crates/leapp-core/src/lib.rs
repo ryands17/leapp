@@ -31,6 +31,10 @@ pub struct Leapp {
     config: Config,
     workspace_path: PathBuf,
     state: Mutex<State>,
+    /// Makes a check of `key_generation` and the keychain write of a parent token one step,
+    /// without the `state` lock: a keychain write can wait for a macOS prompt, and the `state`
+    /// lock must stay free for the UI. Take it before `state`, never while `state` is held.
+    token_lock: Mutex<()>,
 }
 
 /// Everything that changes after `open`, under one lock.
@@ -70,6 +74,7 @@ impl Leapp {
                 key_generation: HashMap::new(),
                 editing: HashSet::new(),
             }),
+            token_lock: Mutex::new(()),
         })
     }
 

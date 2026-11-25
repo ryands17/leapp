@@ -112,9 +112,13 @@ Deferred by the F3 reviews and the final review (open unless marked done):
   `chained_dialog.rs` (T9-m3, final review M2).
 - Core: two parallel fresh parent tokens can split the keychain token and its expiry. The
   MFA-only test also changes the region.
-- Core: `save_parent_token` writes to the keychain under the core state `Mutex`. A blocking
-  keychain prompt would freeze the UI, which reads the workspace each frame. Option: a per-parent
-  write lock. F4 must decide this before it copies the pattern (see the `CLAUDE.md` gotcha).
+- Done (tests `a_slow_parent_token_write_does_not_hold_the_workspace`,
+  `a_key_edit_during_a_slow_parent_token_write_leaves_no_old_token`): `save_parent_token` wrote to
+  the keychain under the core state `Mutex`, so a keychain prompt froze the UI. Owner decision:
+  a separate `token_lock` (option A). The key generation check and the keychain write are one step
+  under `token_lock`; the key change of an edit holds it too; `state` is held only for short checks.
+  Later (F8): the UI thread does not wait for the core lock at all (`try_lock`, settings actions
+  in background tasks).
 - Core: no test for the cascade stop order.
 - Done (test `a_parent_token_of_keys_from_a_failed_key_write_is_not_kept`): if the second key
   write of `update_iam_user` failed, `KeyChange::write` undid the first one but did not bump the
