@@ -4,6 +4,7 @@ use leapp_core::{Session, SessionKind, SessionStatus};
 use rune::{El, Icon, Tx};
 use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement};
 
+use super::change_dialogs;
 use crate::Ui;
 
 /// The width of the column that holds the `⋯` button.
@@ -43,19 +44,33 @@ pub(crate) fn build(s: &Ui, session: &Session, k: &Kit, layer: &mut Vec<El>) -> 
     menu.build(k, layer)
 }
 
-/// The items, in this order: Start or Stop, Edit, Copy account number, Delete.
-fn items(session: &Session) -> [MenuItem; 4] {
+/// The items, in this order (spec 14.3 without the F6 and F7 items): Start or Stop, Change
+/// region, Change named profile, Copy account number, Edit, Delete.
+fn items(session: &Session) -> [MenuItem; 6] {
     let id = session.id;
+    // A pending session can not start, stop or change now.
+    let pending = session.status == SessionStatus::Pending;
     let toggle = match session.status {
         SessionStatus::Active => MenuItem::new("Stop session"),
-        // A pending session can not start or stop now.
-        SessionStatus::Pending => MenuItem::new("Start session").disabled(true),
-        SessionStatus::Inactive => MenuItem::new("Start session"),
+        SessionStatus::Pending | SessionStatus::Inactive => MenuItem::new("Start session"),
     }
+    .disabled(pending)
     .on_select(move |s: &mut Ui| {
         s.close_menu();
         s.toggle(id);
     });
+    let region = MenuItem::new("Change region\u{2026}")
+        .disabled(pending)
+        .on_select(move |s: &mut Ui| {
+            s.close_menu();
+            change_dialogs::open_region(s, id);
+        });
+    let profile = MenuItem::new("Change named profile\u{2026}")
+        .disabled(pending)
+        .on_select(move |s: &mut Ui| {
+            s.close_menu();
+            change_dialogs::open_profile(s, id);
+        });
     let edit = MenuItem::new("Edit session").on_select(move |s: &mut Ui| {
         s.close_menu();
         s.open_edit(id);
@@ -79,5 +94,5 @@ fn items(session: &Session) -> [MenuItem; 4] {
             s.close_menu();
             s.ask_delete(id);
         });
-    [toggle, edit, copy, delete]
+    [toggle, region, profile, copy, edit, delete]
 }

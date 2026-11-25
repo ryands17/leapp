@@ -1,5 +1,6 @@
 //! The views of the main window.
 
+pub(crate) mod change_dialogs;
 pub(crate) mod create_dialog;
 pub(crate) mod delete_dialog;
 pub(crate) mod fields;

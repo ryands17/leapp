@@ -1,4 +1,4 @@
-//! The row menu: start and stop, edit, copy account number, delete.
+//! The row menu: start and stop, change region and profile, copy account number, edit, delete.
 
 mod common;
 
@@ -47,8 +47,10 @@ fn the_menu_starts_and_stops() {
         items,
         [
             "Start session",
-            "Edit session",
+            "Change region…",
+            "Change named profile…",
             "Copy account number",
+            "Edit session",
             "Delete session"
         ]
     );

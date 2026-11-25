@@ -96,6 +96,8 @@ pub struct Ui {
     menu: Option<RowMenu>,
     /// The open delete confirm, if any.
     delete: Option<DeleteAsk>,
+    /// The Change region and Change named profile dialogs.
+    change: views::change_dialogs::ChangeState,
     /// The Settings dialog.
     settings: views::settings_dialog::SettingsState,
     /// The background refresh loop. `on_close` stops it.
@@ -120,6 +122,7 @@ impl Ui {
             starting: HashSet::new(),
             menu: None,
             delete: None,
+            change: Default::default(),
             settings: Default::default(),
             refresh_loop: None,
         }
@@ -354,6 +357,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let mut layer = Vec::new();
     let main = views::main_window::view(s, &k, &mut layer);
     views::create_dialog::build(s, &k, &mut layer);
+    views::change_dialogs::build(s, &k, &mut layer);
     views::delete_dialog::build(s, &k, &mut layer);
     views::settings_dialog::build(s, &k, &mut layer);
     views::overwrite_dialog::build(s, &k, &mut layer);
@@ -400,6 +404,11 @@ pub fn poll(s: &mut Ui, t: f64, tx: &mut Tx) -> bool {
             Msg::FormDone(result) => {
                 views::create_dialog::done(s, result);
                 // An edit can stop or start the session: show its real status.
+                s.refresh();
+            }
+            Msg::ChangeDone { token, result } => {
+                views::change_dialogs::done(s, token, result);
+                // The change can stop and start the session; a failed restart keeps the change.
                 s.refresh();
             }
             Msg::RenameDone { profile_id, result } => {

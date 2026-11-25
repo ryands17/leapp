@@ -33,6 +33,11 @@ pub enum Msg {
         profile_id: uuid::Uuid,
         result: Result<(), leapp_core::Error>,
     },
+    /// The change of region or named profile that a change dialog sent with `token` ended.
+    ChangeDone {
+        token: u64,
+        result: Result<(), leapp_core::Error>,
+    },
     /// Core asks for the MFA code of the session named `session`. Send the code, or `None` to
     /// cancel, on `reply`.
     AskMfa {
