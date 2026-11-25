@@ -80,8 +80,10 @@ fn a_bad_profile_name_shows_under_the_profile_field() {
     let mut h = AppHarness::new();
     h.tap("btn-create");
     fill(&mut h, "dev", "AKID-dev", "SECRET-dev");
-    h.tap("fld-profile");
+    h.tap("sel-profile-value-trigger");
     h.type_text("[bad]");
+    h.frames(10);
+    h.tap("sel-profile-option-__new__");
     h.tap("btn-create-submit");
     h.settle_with(|h| h.has("err-profile"));
 
@@ -251,8 +253,10 @@ fn typing_in_a_field_clears_its_error() {
 
     // The same for a second field: its error goes, the others stay.
     submit_until(&mut h, "err-secret-key");
-    h.tap("fld-profile");
+    h.tap("sel-profile-value-trigger");
     h.type_text("x");
+    h.frames(10);
+    h.tap("sel-profile-option-__new__");
     assert!(
         h.has("err-secret-key"),
         "an edit of the profile keeps the secret key error"

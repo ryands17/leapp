@@ -504,6 +504,10 @@ const SCENES: &[Scene] = &[
         "create-dialog-region",
         views::create_dialog::open_with_region_list,
     ),
+    (
+        "create-dialog-profile",
+        views::create_dialog::open_with_profile_list,
+    ),
 ];
 
 /// One inactive IAM User. Needs no AWS: it only writes the workspace and the secret store.

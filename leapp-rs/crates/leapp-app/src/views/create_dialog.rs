@@ -1,18 +1,17 @@
 //! The IAM User form: one dialog to create a session or to edit one (spec 14.5, IAM User part).
 
-use leapp_core::regions::{DEFAULT_REGION, REGIONS};
+use leapp_core::regions::DEFAULT_REGION;
 use leapp_core::{Error, Field, IamUserUpdate, NewIamUser, SessionId, SessionKind};
-use rune::{El, TextEdit, Tx, col, el, row, text};
+use rune::{El, TextEdit, Tx, col, row, text};
 use rune_kit::{
-    Button, ButtonVariant, Combobox, ComboboxEvent, ComboboxOption, ComboboxState, Dialog,
-    IconButton, IconButtonVariant, Kit, Placement, TextInput, glyphs,
+    Button, ButtonVariant, ComboboxEvent, Dialog, IconButton, IconButtonVariant, Kit, TextInput,
+    glyphs,
 };
 
+use super::fields::{FIELD_WIDTH, ProfileChoice, RegionChoice, field, profile_field, region_field};
 use crate::{Msg, Ui};
 
 const DIALOG_WIDTH: f32 = 520.0;
-const FIELD_WIDTH: f32 = 340.0;
-const LABEL_WIDTH: f32 = 150.0;
 
 const DEFAULT_PROFILE: &str = "default";
 
@@ -38,10 +37,10 @@ pub struct CreateForm {
     secret_access_key: TextEdit,
     /// True when the eye shows the secret key. Display only: the field stays secure.
     secret_shown: bool,
-    profile: TextEdit,
-    region: String,
-    /// The region list: open or closed, and its search text.
-    region_combo: ComboboxState,
+    /// The Named profile select: an existing profile, or a new name that the save creates.
+    profile: ProfileChoice,
+    /// The region select.
+    region: RegionChoice,
     mfa_device: TextEdit,
     errors: FieldErrors,
     /// True while core creates or saves the session, off the render thread.
@@ -57,8 +56,8 @@ impl std::fmt::Debug for CreateForm {
             .field("name", &self.name.text)
             .field("access_key_id", &"<redacted>")
             .field("secret_access_key", &"<redacted>")
-            .field("profile", &self.profile.text)
-            .field("region", &self.region)
+            .field("profile", &self.profile.name)
+            .field("region", &self.region.region)
             .field("mfa_device", &self.mfa_device.text)
             .field("errors", &self.errors)
             .field("saving", &self.saving)
@@ -110,9 +109,8 @@ impl Default for CreateForm {
             access_key_id: TextEdit::default(),
             secret_access_key: TextEdit::default().secure(),
             secret_shown: false,
-            profile: TextEdit::new(DEFAULT_PROFILE),
-            region: DEFAULT_REGION.to_string(),
-            region_combo: ComboboxState::default(),
+            profile: ProfileChoice::new(DEFAULT_PROFILE),
+            region: RegionChoice::new(DEFAULT_REGION),
             mfa_device: TextEdit::default(),
             errors: FieldErrors::default(),
             saving: false,
@@ -152,11 +150,11 @@ impl CreateForm {
     }
 
     pub fn profile(&self) -> &str {
-        &self.profile.text
+        &self.profile.name
     }
 
     pub fn region(&self) -> &str {
-        &self.region
+        &self.region.region
     }
 
     pub fn mfa_device(&self) -> &str {
@@ -180,8 +178,8 @@ impl CreateForm {
             name: self.name.text.clone(),
             access_key_id: self.access_key_id.text.clone(),
             secret_access_key: self.secret_access_key.text.clone(),
-            profile_name: self.profile.text.clone(),
-            region: self.region.clone(),
+            profile_name: self.profile.name.clone(),
+            region: self.region.region.clone(),
             mfa_device: Some(self.mfa_device.text.clone()),
         }
     }
@@ -190,8 +188,8 @@ impl CreateForm {
     fn update(&self) -> IamUserUpdate {
         IamUserUpdate {
             name: self.name.text.clone(),
-            profile_name: self.profile.text.clone(),
-            region: self.region.clone(),
+            profile_name: self.profile.name.clone(),
+            region: self.region.region.clone(),
             mfa_device: Some(self.mfa_device.text.clone()),
             access_key_id: Some(self.access_key_id.text.clone()),
             secret_access_key: Some(self.secret_access_key.text.clone()),
@@ -253,12 +251,14 @@ fn errors_from(e: &Error) -> FieldErrors {
     errors
 }
 
-/// Opens the empty form in create mode. Ignored while a save runs.
+/// Opens the empty form in create mode, on the `default` profile and the default region of the
+/// settings. Ignored while a save runs.
 pub(crate) fn open(s: &mut Ui) {
     if s.create.saving {
         return;
     }
     s.create.reset();
+    s.create.region = RegionChoice::new(s.ws.settings.default_region.as_str());
     s.create.open = true;
 }
 
@@ -280,8 +280,8 @@ pub(crate) fn open_edit(s: &mut Ui, id: SessionId) {
         open: true,
         mode: FormMode::Edit(id),
         name: TextEdit::new(session.name.as_str()),
-        profile: TextEdit::new(profile),
-        region: session.region.clone(),
+        profile: ProfileChoice::new(profile),
+        region: RegionChoice::new(session.region.as_str()),
         mfa_device: TextEdit::new(mfa_device.as_deref().unwrap_or_default()),
         ..CreateForm::default()
     };
@@ -290,10 +290,17 @@ pub(crate) fn open_edit(s: &mut Ui, id: SessionId) {
 /// Opens the dialog with the region list open too. For the headless scene only.
 pub(crate) fn open_with_region_list(s: &mut Ui) {
     open(s);
-    let current = Some(s.create.region.as_str());
-    s.create
-        .region_combo
-        .step(ComboboxEvent::Toggle { current });
+    let region = &mut s.create.region;
+    let current = Some(region.region.as_str());
+    region.combo.step(ComboboxEvent::Toggle { current });
+}
+
+/// Opens the dialog with the profile list open too. For the headless scene only.
+pub(crate) fn open_with_profile_list(s: &mut Ui) {
+    open(s);
+    let profile = &mut s.create.profile;
+    let current = Some(profile.name.as_str());
+    profile.combo.step(ComboboxEvent::Toggle { current });
 }
 
 /// Closes the form and wipes it. Ignored while a save runs: its result goes to this form.
@@ -316,24 +323,23 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     }
     let editing = matches!(f.mode, FormMode::Edit(_));
     let key_placeholder = |create: &'static str| if editing { KEEP_KEY } else { create };
-    let regions: Vec<ComboboxOption> = REGIONS
-        .iter()
-        .map(|r| ComboboxOption::new(*r, *r))
-        .collect();
-    let region = Combobox::new("sel-region", &f.region_combo, &regions, |s: &mut Ui| {
-        &mut s.create.region_combo
-    })
-    .current(Some(&f.region))
-    .width(FIELD_WIDTH)
-    .placement(Placement::BottomStart)
-    .label("Region")
-    .search_placeholder("Search regions")
-    .empty_message("No region matches")
-    .on_choose(|s: &mut Ui, region: &str, _tx: &mut Tx| {
-        s.create.region = region.to_string();
-        s.create.errors.region = None;
-    })
-    .build(k, layer);
+    let region = region_field(
+        "sel-region",
+        &f.region,
+        |s: &mut Ui| &mut s.create.region,
+        |s: &mut Ui| s.create.errors.region = None,
+        k,
+        layer,
+    );
+    let profile = profile_field(
+        "sel-profile",
+        &f.profile,
+        &s.ws.profiles,
+        |s: &mut Ui| &mut s.create.profile,
+        |s: &mut Ui| s.create.errors.profile = None,
+        k,
+        layer,
+    );
 
     let eye = IconButton::new(if f.secret_shown {
         &glyphs::EYE_OFF
@@ -410,22 +416,14 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
             "Named Profile",
             "err-profile",
             f.errors.profile.as_deref(),
-            TextInput::new(&f.profile)
-                .placeholder("Named Profile")
-                .label("Named Profile")
-                .width(Some(FIELD_WIDTH))
-                .invalid(f.errors.profile.is_some())
-                .on_edit(|s: &mut Ui| &mut s.create.profile)
-                .on_change(|s: &mut Ui, _tx: &mut Tx| s.create.errors.profile = None)
-                .build(k)
-                .key("fld-profile"),
+            profile,
         ))
         .child(field(
             k,
             "Region",
             "err-region",
             f.errors.region.as_deref(),
-            el().key("sel-region").child(region),
+            region,
         ))
         .child(field(
             k,
@@ -463,25 +461,6 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
         .on_close(cancel)
         .child(body)
         .build(k, layer);
-}
-
-/// A label on the left, the input on the right, and the error text under the input.
-fn field(k: &Kit, label: &str, err_key: &str, err: Option<&str>, input: El) -> El {
-    let label = text(label.to_string())
-        .font(k.ty.ui)
-        .color(k.c.text_base)
-        .w(LABEL_WIDTH);
-    let mut right = col().gap(4.0).child(input);
-    if let Some(message) = err {
-        right = right.child(
-            text(message.to_string())
-                .key(err_key)
-                .role("alert")
-                .font(k.ty.small)
-                .color(k.c.danger.fg),
-        );
-    }
-    row().w_full().gap(12.0).child(label).child(right)
 }
 
 /// Cancel and Submit. Both are disabled while a save runs.
