@@ -3,7 +3,31 @@
 mod common;
 
 use common::{AppHarness, iam_user};
-use leapp_core::{SessionId, SessionStatus};
+use leapp_core::{Leapp, NewIamRoleChained, SessionId, SessionStatus};
+
+const ROLE_ARN: &str = "arn:aws:iam::123456789012:role/deploy";
+
+/// A chained session `name` below `parent`, on profile `profile`, that assumes [`ROLE_ARN`].
+fn chained(l: &Leapp, name: &str, parent: SessionId, profile: &str) -> SessionId {
+    l.create_iam_role_chained(NewIamRoleChained {
+        name: name.to_string(),
+        parent_session_id: parent,
+        role_arn: ROLE_ARN.to_string(),
+        role_session_name: None,
+        external_id: None,
+        profile_name: profile.to_string(),
+        region: "eu-west-1".to_string(),
+    })
+    .unwrap()
+}
+
+/// The texts of the items of the open menu of `id`, top to bottom.
+fn menu_items(h: &AppHarness, id: SessionId) -> Vec<String> {
+    h.keys_with_prefix(&format!("menu-{id}-item"))
+        .iter()
+        .map(|k| h.text_of(k).unwrap_or_default())
+        .collect()
+}
 
 fn status(ui: &leapp_app::Ui, id: SessionId) -> SessionStatus {
     ui.workspace().session(id).unwrap().status
@@ -210,4 +234,78 @@ fn edit_opens_the_form_for_that_session() {
     assert!(h.has_text("Edit IAM User"), "the title");
     assert_eq!(h.rt.state.create_form().name(), "beta");
     assert_eq!(h.text_of("fld-name").as_deref(), Some("beta"));
+}
+
+#[test]
+fn copy_role_arn_and_account_of_a_chained_session() {
+    let (mut h, (p, c)) = AppHarness::with_setup(|l| {
+        let p = l.create_iam_user(iam_user("P", "default")).unwrap();
+        let c = chained(l, "C", p, "ci");
+        (p, c)
+    });
+
+    open_menu(&mut h, c);
+    assert_eq!(
+        menu_items(&h, c),
+        [
+            "Start session",
+            "Change region…",
+            "Change named profile…",
+            "Copy account number",
+            "Copy role ARN",
+            "Edit session",
+            "Delete session"
+        ]
+    );
+    h.tap_menu_item(c, "Copy role ARN");
+    h.frames(2);
+    assert_eq!(h.clipboard_text().as_deref(), Some(ROLE_ARN));
+
+    // The account comes from the role ARN: no start is needed.
+    open_menu(&mut h, c);
+    h.tap_menu_item(c, "Copy account number");
+    h.frames(2);
+    assert_eq!(h.clipboard_text().as_deref(), Some("123456789012"));
+
+    open_menu(&mut h, p);
+    assert!(
+        !menu_items(&h, p).iter().any(|i| i == "Copy role ARN"),
+        "an IAM User has no role ARN"
+    );
+}
+
+#[test]
+fn delete_of_a_parent_names_its_chain() {
+    let (mut h, (p, c1, c2)) = AppHarness::with_setup(|l| {
+        let p = l.create_iam_user(iam_user("P", "default")).unwrap();
+        let c1 = chained(l, "C1", p, "c1");
+        let c2 = chained(l, "C2", c1, "c2");
+        (p, c1, c2)
+    });
+
+    // One session below: the singular form.
+    open_menu(&mut h, c1);
+    h.tap_menu_item(c1, "Delete session");
+    assert_eq!(
+        h.text_of("dlg-delete").as_deref(),
+        Some("Delete session C1? 1 chained session that uses it will also be deleted.")
+    );
+    h.wait_for_arming();
+    h.tap("btn-delete-no");
+    h.frames(30);
+
+    open_menu(&mut h, p);
+    h.tap_menu_item(p, "Delete session");
+    assert_eq!(
+        h.text_of("dlg-delete").as_deref(),
+        Some("Delete session P? 2 chained sessions that use it will also be deleted.")
+    );
+    h.wait_for_arming();
+    h.tap("btn-delete-yes");
+    h.settle(|ui| ui.workspace().sessions.is_empty());
+
+    for id in [p, c1, c2] {
+        assert!(!h.has(&format!("row-{id}")), "the row of {id} is gone");
+    }
+    assert!(h.leapp.workspace().sessions.is_empty());
 }

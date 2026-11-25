@@ -272,7 +272,7 @@ pub(crate) fn open_edit(s: &mut Ui, id: SessionId) {
         return;
     };
     let profile = s.ws.profile_name(session.profile_id).unwrap_or_default();
-    // Task 9 adds the edit form of a chained session.
+    // The chained form edits a chained session.
     let SessionKind::IamUser { mfa_device, .. } = &session.kind else {
         return;
     };

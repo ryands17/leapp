@@ -45,8 +45,9 @@ pub(crate) fn build(s: &Ui, session: &Session, k: &Kit, layer: &mut Vec<El>) -> 
 }
 
 /// The items, in this order (spec 14.3 without the F6 and F7 items): Start or Stop, Change
-/// region, Change named profile, Copy account number, Edit, Delete.
-fn items(session: &Session) -> [MenuItem; 6] {
+/// region, Change named profile, Copy account number, Copy role ARN (chained sessions only),
+/// Edit, Delete.
+fn items(session: &Session) -> Vec<MenuItem> {
     let id = session.id;
     // A pending session can not start, stop or change now.
     let pending = session.status == SessionStatus::Pending;
@@ -75,11 +76,7 @@ fn items(session: &Session) -> [MenuItem; 6] {
         s.close_menu();
         s.open_edit(id);
     });
-    let account = match &session.kind {
-        SessionKind::IamUser { account, .. } => account.clone(),
-        // Task 10 adds the account and the role ARN of a chained session.
-        SessionKind::IamRoleChained { .. } => None,
-    };
+    let account = session.account();
     let copy = MenuItem::new("Copy account number")
         .disabled(account.is_none())
         .on_select_tx(move |s: &mut Ui, tx: &mut Tx| {
@@ -94,5 +91,18 @@ fn items(session: &Session) -> [MenuItem; 6] {
             s.close_menu();
             s.ask_delete(id);
         });
-    [toggle, region, profile, copy, edit, delete]
+    let role_arn = match &session.kind {
+        SessionKind::IamRoleChained { role_arn, .. } => Some(role_arn.clone()),
+        SessionKind::IamUser { .. } => None,
+    };
+    let copy_role_arn = role_arn.map(|arn| {
+        MenuItem::new("Copy role ARN").on_select_tx(move |s: &mut Ui, tx: &mut Tx| {
+            s.close_menu();
+            tx.copy(arn.clone());
+        })
+    });
+    let mut items = vec![toggle, region, profile, copy];
+    items.extend(copy_role_arn);
+    items.extend([edit, delete]);
+    items
 }

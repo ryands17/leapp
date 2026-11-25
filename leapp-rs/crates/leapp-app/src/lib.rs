@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use leapp_core::{Leapp, NewIamUser, SessionId, SessionStatus, Workspace};
+use leapp_core::{Leapp, NewIamUser, SessionId, SessionKind, SessionStatus, Workspace};
 use rune::{AppSpec, Cx, El, PointerPress, TextEdit, Tx, Waker};
 use rune_kit::{Kit, root};
 use tokio::sync::oneshot;
@@ -46,6 +46,8 @@ pub(crate) struct RowMenu {
 pub(crate) struct DeleteAsk {
     pub(crate) id: SessionId,
     pub(crate) name: String,
+    /// How many chained sessions below it, at any depth, the delete also deletes.
+    pub(crate) chained: usize,
     /// When the confirm was first polled; `None` before that.
     since: Option<f64>,
     /// True [`CONFIRM_ARM_SECONDS`] after `since`: the buttons take answers.
@@ -160,10 +162,15 @@ impl Ui {
         &self.chained
     }
 
-    /// Opens the session form in edit mode for session `id`, filled from the workspace. The key
-    /// fields stay empty. Ignored while a save runs, or if the session is gone.
+    /// Opens the form of the type of session `id` in edit mode, filled from the workspace: the
+    /// IAM User form (its key fields stay empty) or the IAM Role Chained form. Ignored while a
+    /// save of that form runs, or if the session is gone.
     pub fn open_edit(&mut self, id: SessionId) {
-        views::create_dialog::open_edit(self, id);
+        match self.ws.session(id).map(|s| &s.kind) {
+            Some(SessionKind::IamUser { .. }) => views::create_dialog::open_edit(self, id),
+            Some(SessionKind::IamRoleChained { .. }) => views::chained_dialog::open_edit(self, id),
+            None => {}
+        }
     }
 
     /// The profile of the overwrite question that the dialog shows now, if any.
@@ -335,6 +342,7 @@ impl Ui {
             self.delete = Some(DeleteAsk {
                 id,
                 name: session.name.clone(),
+                chained: self.ws.descendants(id).len(),
                 since: None,
                 armed: false,
             });

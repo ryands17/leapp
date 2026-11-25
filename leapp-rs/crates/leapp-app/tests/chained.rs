@@ -3,9 +3,47 @@
 mod common;
 
 use common::{AppHarness, iam_user};
-use leapp_core::{SessionId, SessionKind, SessionStatus};
+use leapp_core::{Leapp, NewIamRoleChained, SessionId, SessionKind, SessionStatus};
+use rune::Key;
 
 const ROLE_ARN: &str = "arn:aws:iam::123456789012:role/deploy";
+
+/// A chained session `name` below `parent`, on profile `profile`, that assumes [`ROLE_ARN`].
+fn chained(l: &Leapp, name: &str, parent: SessionId, profile: &str) -> SessionId {
+    l.create_iam_role_chained(NewIamRoleChained {
+        name: name.to_string(),
+        parent_session_id: parent,
+        role_arn: ROLE_ARN.to_string(),
+        role_session_name: None,
+        external_id: None,
+        profile_name: profile.to_string(),
+        region: "eu-west-1".to_string(),
+    })
+    .unwrap()
+}
+
+/// Opens the row menu of `id` and chooses Edit session.
+fn open_edit(h: &mut AppHarness, id: SessionId) {
+    h.tap(&format!("row-menu-{id}"));
+    h.tap_menu_item(id, "Edit session");
+    assert!(h.has("dlg-iam-role-chained"), "the chained form opens");
+}
+
+/// Focuses `field` and deletes its text.
+fn clear(h: &mut AppHarness, field: &str) {
+    h.tap(field);
+    h.press(Key::End);
+    for _ in 0..80 {
+        h.press(Key::Backspace);
+    }
+}
+
+fn role_arn(h: &AppHarness, id: SessionId) -> String {
+    match &h.leapp.workspace().session(id).unwrap().kind {
+        SessionKind::IamRoleChained { role_arn, .. } => role_arn.clone(),
+        SessionKind::IamUser { .. } => panic!("not a chained session"),
+    }
+}
 
 /// A harness with one IAM User `P` on the `default` profile: the parent.
 fn with_parent() -> (AppHarness, SessionId) {
@@ -306,4 +344,88 @@ fn submit_is_disabled_while_the_session_is_saved() {
         2,
         "one tap, one session"
     );
+}
+
+#[test]
+fn a_chained_session_is_edited() {
+    const NEW_ARN: &str = "arn:aws:iam::210987654321:role/release";
+    let (mut h, (parent, id)) = AppHarness::with_setup(|l| {
+        let p = l.create_iam_user(iam_user("P", "default")).unwrap();
+        let c = chained(l, "deploy", p, "ci");
+        (p, c)
+    });
+    h.tap(&format!("status-{id}"));
+    h.settle(|ui| ui.workspace().session(id).unwrap().status == SessionStatus::Active);
+
+    open_edit(&mut h, id);
+    assert!(h.has_text("Edit IAM Role Chained"), "the title");
+    assert_eq!(h.text_of("btn-chained-submit").as_deref(), Some("Save"));
+    assert_eq!(h.text_of("fld-chained-name").as_deref(), Some("deploy"));
+    assert_eq!(h.text_of("fld-role-arn").as_deref(), Some(ROLE_ARN));
+    assert_eq!(h.text_of("sel-parent").as_deref(), Some("P"), "the parent");
+
+    clear(&mut h, "fld-role-arn");
+    h.type_text(NEW_ARN);
+    h.tap("btn-chained-submit");
+    h.settle_with(|h| !h.has("dlg-iam-role-chained"));
+    h.settle(|ui| ui.workspace().session(id).unwrap().status == SessionStatus::Active);
+
+    assert_eq!(role_arn(&h, id), NEW_ARN);
+    let ws = h.leapp.workspace();
+    let session = ws.session(id).unwrap();
+    assert_eq!(
+        session.status,
+        SessionStatus::Active,
+        "active after the restart"
+    );
+    assert_eq!(session.name, "deploy", "the other fields stay");
+    assert!(matches!(
+        &session.kind,
+        SessionKind::IamRoleChained { parent_session_id, .. } if *parent_session_id == parent
+    ));
+    assert_eq!(ws.sessions.len(), 2, "no new session");
+    assert_eq!(
+        h.text_of(&format!("status-{id}")).as_deref(),
+        Some("active")
+    );
+    // The restart assumed the new role.
+    let last = h
+        .fake
+        .requests()
+        .into_iter()
+        .rfind(|r| r.action == "AssumeRole")
+        .unwrap();
+    assert_eq!(
+        last.params.get("RoleArn").map(String::as_str),
+        Some(NEW_ARN)
+    );
+    assert_eq!(h.fake.count("AssumeRole"), 2, "one start, one restart");
+}
+
+#[test]
+fn the_parent_select_leaves_out_the_session_and_its_chain() {
+    let (mut h, (p, c1, c2)) = AppHarness::with_setup(|l| {
+        let p = l.create_iam_user(iam_user("P", "default")).unwrap();
+        let c1 = chained(l, "C1", p, "c1");
+        let c2 = chained(l, "C2", c1, "c2");
+        (p, c1, c2)
+    });
+    open_edit(&mut h, c1);
+    h.tap("sel-parent-value-trigger");
+    h.frames(10);
+
+    assert_eq!(
+        h.keys_with_prefix("sel-parent-option-"),
+        [format!("sel-parent-option-{p}")]
+    );
+    assert!(!h.has(&format!("sel-parent-option-{c1}")));
+    assert!(!h.has(&format!("sel-parent-option-{c2}")));
+
+    // The create form still lists every session.
+    h.press(Key::Escape);
+    h.tap("btn-chained-cancel");
+    h.open_chained_form();
+    h.tap("sel-parent-value-trigger");
+    h.frames(10);
+    assert_eq!(h.keys_with_prefix("sel-parent-option-").len(), 3);
 }

@@ -1,11 +1,12 @@
-//! The IAM Role Chained form (spec 14.5, IAM Role Chained part): create mode. The parent list
-//! ([`parent_options`]) also serves the edit mode, which leaves out the edited session and the
-//! sessions below it.
+//! The IAM Role Chained form (spec 14.5, IAM Role Chained part): one dialog to create a chained
+//! session or to edit one. In edit mode the parent list ([`parent_options`]) leaves out the
+//! edited session and the sessions below it.
 
 use std::collections::HashSet;
 
 use leapp_core::{
-    DEFAULT_ROLE_SESSION_NAME, Error, Field, NewIamRoleChained, SessionId, Workspace,
+    DEFAULT_ROLE_SESSION_NAME, Error, Field, IamRoleChainedUpdate, NewIamRoleChained, SessionId,
+    SessionKind, Workspace,
 };
 use rune::{Color, El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{
@@ -36,6 +37,8 @@ pub(crate) fn purple() -> Color {
 #[derive(Default)]
 pub struct ChainedForm {
     open: bool,
+    /// The session of an edit. `None`: the form creates a new session.
+    editing: Option<SessionId>,
     name: TextEdit,
     /// The chosen parent ("Assumer session"). `None` until the user chooses one.
     parent: Option<SessionId>,
@@ -56,6 +59,7 @@ impl std::fmt::Debug for ChainedForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChainedForm")
             .field("open", &self.open)
+            .field("editing", &self.editing)
             .field("name", &self.name.text)
             .field("parent", &self.parent)
             .field("role_arn", &self.role_arn.text)
@@ -114,7 +118,12 @@ impl ChainedForm {
         self.open
     }
 
-    /// True while core creates the session. Submit and Cancel are disabled.
+    /// The session that the form edits. `None` in create mode.
+    pub fn editing(&self) -> Option<SessionId> {
+        self.editing
+    }
+
+    /// True while core creates or saves the session. Submit and Cancel are disabled.
     pub fn is_saving(&self) -> bool {
         self.saving.is_some()
     }
@@ -135,6 +144,28 @@ impl ChainedForm {
             next_token,
             ..ChainedForm::default()
         };
+    }
+
+    /// The new values of the form for an edit. `None` if no parent is chosen.
+    fn update(&self) -> Option<IamRoleChainedUpdate> {
+        let NewIamRoleChained {
+            name,
+            parent_session_id,
+            role_arn,
+            role_session_name,
+            external_id,
+            profile_name,
+            region,
+        } = self.request()?;
+        Some(IamRoleChainedUpdate {
+            name,
+            parent_session_id,
+            role_arn,
+            role_session_name,
+            external_id,
+            profile_name,
+            region,
+        })
     }
 
     /// The request of the form. `None` if no parent is chosen.
@@ -179,6 +210,38 @@ pub(crate) fn open(s: &mut Ui) {
     f.open = true;
 }
 
+/// Opens the form in edit mode with the values of the chained session `id`. Ignored while a save
+/// runs, or if the session is gone or is not a chained session.
+pub(crate) fn open_edit(s: &mut Ui, id: SessionId) {
+    if s.chained.saving.is_some() {
+        return;
+    }
+    let Some(session) = s.ws.session(id) else {
+        return;
+    };
+    let SessionKind::IamRoleChained {
+        role_arn,
+        parent_session_id,
+        role_session_name,
+        external_id,
+    } = &session.kind
+    else {
+        return;
+    };
+    let profile = s.ws.profile_name(session.profile_id).unwrap_or_default();
+    let f = &mut s.chained;
+    f.reset();
+    f.editing = Some(id);
+    f.name = TextEdit::new(session.name.as_str());
+    f.parent = Some(*parent_session_id);
+    f.role_arn = TextEdit::new(role_arn.as_str());
+    f.role_session_name = TextEdit::new(role_session_name.as_deref().unwrap_or_default());
+    f.external_id = TextEdit::new(external_id.as_deref().unwrap_or_default());
+    f.profile = ProfileChoice::new(profile);
+    f.region = RegionChoice::new(session.region.as_str());
+    f.open = true;
+}
+
 /// Closes the form and wipes it. Ignored while a save runs: its result goes to this form.
 fn cancel(s: &mut Ui) {
     if s.chained.saving.is_some() {
@@ -187,23 +250,33 @@ fn cancel(s: &mut Ui) {
     s.chained.reset();
 }
 
-/// Sends the form to core, off the render thread (`create_iam_role_chained` does blocking file
-/// I/O). [`done`] gets the result. Ignored unless [`ChainedForm::can_submit`].
+/// Sends the form to core, off the render thread: `create_iam_role_chained` does blocking file
+/// I/O, and an edit can stop and start the session. [`done`] gets the result. Ignored unless
+/// [`ChainedForm::can_submit`].
 fn submit(s: &mut Ui, _tx: &mut Tx) {
     let f = &mut s.chained;
     if !f.open || !f.can_submit() {
         return;
     }
-    let Some(req) = f.request() else {
-        return;
+    let leapp = s.leapp.clone();
+    let task = match f.editing {
+        None => {
+            let Some(req) = f.request() else {
+                return;
+            };
+            s.rt.spawn_blocking(move || leapp.create_iam_role_chained(req).map(drop))
+        }
+        Some(id) => {
+            let Some(req) = f.update() else {
+                return;
+            };
+            s.rt.spawn(async move { leapp.update_iam_role_chained(id, req).await })
+        }
     };
     let token = f.next_token;
     f.next_token = token.wrapping_add(1);
     f.saving = Some(token);
-    let leapp = s.leapp.clone();
     let bridge = s.bridge.clone();
-    let task =
-        s.rt.spawn_blocking(move || leapp.create_iam_role_chained(req).map(drop));
     // Always send a result, also if the task panics: else the form stays locked.
     s.rt.spawn(async move {
         let result = task.await.unwrap_or_else(|_| {
@@ -275,7 +348,7 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     let parent = Combobox::new(
         parent_key,
         &f.parent_combo,
-        &parent_options(&s.ws, None),
+        &parent_options(&s.ws, f.editing),
         |s: &mut Ui| &mut s.chained.parent_combo,
     )
     .current(current.as_deref())
@@ -389,10 +462,20 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .font(k.ty.small)
                 .color(k.c.danger.fg)
         }))
-        .child(buttons(k, f.can_submit(), f.saving.is_some()));
+        .child(buttons(
+            k,
+            f.editing.is_some(),
+            f.can_submit(),
+            f.saving.is_some(),
+        ));
 
+    let title = if f.editing.is_some() {
+        "Edit IAM Role Chained"
+    } else {
+        "Create IAM Role Chained"
+    };
     // The rune-kit `Dialog` keys its panel `<key>-dialog`.
-    Dialog::new("dlg-chained", "Create IAM Role Chained")
+    Dialog::new("dlg-chained", title)
         .width(DIALOG_WIDTH)
         .fit()
         .open(true)
@@ -401,9 +484,10 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
-/// Cancel and Create Session. Cancel is disabled while a save runs; Create Session is disabled
-/// until the required fields are filled, and while a save runs.
-fn buttons(k: &Kit, can_submit: bool, saving: bool) -> El {
+/// Cancel and Submit (`Create Session`, or `Save` in edit mode). Cancel is disabled while a save
+/// runs; Submit is disabled until the required fields are filled, and while a save runs.
+fn buttons(k: &Kit, editing: bool, can_submit: bool, saving: bool) -> El {
+    let submit_label = if editing { "Save" } else { "Create Session" };
     row()
         .w_full()
         .pt(8.0)
@@ -418,7 +502,7 @@ fn buttons(k: &Kit, can_submit: bool, saving: bool) -> El {
                 .key("btn-chained-cancel"),
         )
         .child(
-            Button::new("Create Session")
+            Button::new(submit_label)
                 .disabled(!can_submit)
                 .on_press_tx(submit)
                 .build(k)

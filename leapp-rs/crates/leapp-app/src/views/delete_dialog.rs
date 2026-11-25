@@ -1,4 +1,5 @@
-//! The question "delete this session?" before the row menu deletes a session.
+//! The question "delete this session?" before the row menu deletes a session. It names the
+//! chained sessions below it, which the delete also deletes.
 
 use rune::{El, col, row, text};
 use rune_kit::{Button, ButtonVariant, Dialog, Kit};
@@ -6,6 +7,18 @@ use rune_kit::{Button, ButtonVariant, Dialog, Kit};
 use crate::Ui;
 
 const DIALOG_WIDTH: f32 = 400.0;
+
+/// The text of the confirm. A second sentence names the chained sessions that the delete also
+/// deletes, when there are some.
+fn question(name: &str, chained: usize) -> String {
+    match chained {
+        0 => format!("Delete session {name}?"),
+        1 => format!("Delete session {name}? 1 chained session that uses it will also be deleted."),
+        n => {
+            format!("Delete session {name}? {n} chained sessions that use it will also be deleted.")
+        }
+    }
+}
 
 /// Adds the dialog to `layer` while the user is asked.
 pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
@@ -21,7 +34,7 @@ pub(crate) fn build(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
         .pb(16.0)
         .gap(12.0)
         .child(
-            text(format!("Delete session {}?", ask.name))
+            text(question(&ask.name, ask.chained))
                 .font(k.ty.ui)
                 .color(k.c.text_base),
         )
